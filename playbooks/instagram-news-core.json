@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "name": "Instagram News Core",
+  "headlineRules": [
+    "Lead with the strongest consequence, discovery, or warning.",
+    "Prefer simple, concrete wording over abstract hype.",
+    "Make the first line feel like a reason to stop scrolling.",
+    "Avoid unsupported clickbait and broad claims."
+  ],
+  "subheadlineRules": [
+    "Use the second line to add one clarifying detail.",
+    "Keep it short enough to survive a template fit-check.",
+    "Do not repeat the exact words from the first line."
+  ],
+  "captionRules": [
+    "Summarize the key finding in 3-5 short sentences.",
+    "Explain why it matters now.",
+    "Keep the tone journalistic but human.",
+    "Do not invent quotes, numbers, or medical claims."
+  ],
+  "imageDecisionRules": [
+    "Use the original image when it is relevant, human, and visually clear.",
+    "Recommend a generated replacement when the source looks like a logo, thumbnail, infographic, icon, or weak stock asset.",
+    "If the original image is weak, still keep the post publishable and provide an image prompt for a future image generator."
+  ],
+  "imagePromptTemplate": "Editorial Instagram cover for news story: {{title}}. Focus on the key scene or consequence. Realistic, high contrast, clean composition, no text, no watermark.",
+  "examples": [
+    {
+      "rawTitle": "New study links late-night scrolling to poorer sleep quality",
+      "headline": "SCROLLING HURTS SLEEP",
+      "subheadline": "study finds nighttime effect"
+    },
+    {
+      "rawTitle": "Scientists identify simple diet change that improves gut health",
+      "headline": "DIET CHANGE HELPS GUT",
+      "subheadline": "researchers explain why"
+    }
+  ]
+}
