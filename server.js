@@ -39,6 +39,7 @@ const GenerateSchema = z.object({
 }).passthrough();
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
 app.use(pinoHttp({ logger }));
 app.use('/api/', rateLimit({ windowMs: 60_000, max: 60, message: { error: 'Too many requests' } }));
