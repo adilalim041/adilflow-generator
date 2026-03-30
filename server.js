@@ -833,15 +833,18 @@ app.get('/health', async (req, res) => {
     });
 });
 
-// Temporary debug endpoint - remove after fixing auth
+// Temporary debug endpoint - remove after fixing
 app.get('/api/debug-auth', (req, res) => {
     const raw = req.headers.authorization || '';
     const key = raw.replace(/^Bearer\s+/i, '').trim();
     res.json({
-        key_configured: !!GENERATOR_API_KEY,
-        key_length: GENERATOR_API_KEY.length,
-        key_prefix: GENERATOR_API_KEY.slice(0, 10),
-        received_length: key.length,
+        generator_key_ok: !!GENERATOR_API_KEY,
+        generator_key_len: GENERATOR_API_KEY.length,
+        generator_key_prefix: GENERATOR_API_KEY.slice(0, 10),
+        brain_url: BRAIN_URL,
+        brain_key_len: BRAIN_API_KEY.length,
+        brain_key_prefix: BRAIN_API_KEY.slice(0, 10),
+        received_len: key.length,
         received_prefix: key.slice(0, 10),
         match: key === GENERATOR_API_KEY
     });
