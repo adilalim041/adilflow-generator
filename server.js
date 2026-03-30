@@ -124,8 +124,10 @@ const brainBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, nam
 
 function authMiddleware(req, res, next) {
     if (!GENERATOR_API_KEY) return next();
-    const key = req.headers.authorization?.replace('Bearer ', '');
+    const raw = req.headers.authorization || '';
+    const key = raw.replace(/^Bearer\s+/i, '').trim();
     if (key !== GENERATOR_API_KEY) {
+        logger.warn({ got: key.slice(0, 8) + '...', expect: GENERATOR_API_KEY.slice(0, 8) + '...' }, 'Auth mismatch');
         return res.status(401).json({ error: 'Unauthorized' });
     }
     next();
