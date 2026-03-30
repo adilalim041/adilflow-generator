@@ -833,6 +833,20 @@ app.get('/health', async (req, res) => {
     });
 });
 
+// Temporary debug endpoint - remove after fixing auth
+app.get('/api/debug-auth', (req, res) => {
+    const raw = req.headers.authorization || '';
+    const key = raw.replace(/^Bearer\s+/i, '').trim();
+    res.json({
+        key_configured: !!GENERATOR_API_KEY,
+        key_length: GENERATOR_API_KEY.length,
+        key_prefix: GENERATOR_API_KEY.slice(0, 10),
+        received_length: key.length,
+        received_prefix: key.slice(0, 10),
+        match: key === GENERATOR_API_KEY
+    });
+});
+
 app.post('/api/generate', authMiddleware, validate(GenerateSchema), async (req, res) => {
     try {
         const { niche = 'health_medicine', count = 3 } = req.body || {};
