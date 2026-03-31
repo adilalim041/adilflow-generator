@@ -60,6 +60,8 @@ const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '';
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
 const CLOUDINARY_PRESET = process.env.CLOUDINARY_PRESET || 'ml_default';
 const GENERATOR_PLAYBOOK_PATH = process.env.GENERATOR_PLAYBOOK_PATH || path.join(__dirname, 'playbooks', 'instagram-news-core.json');
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash-preview-image-generation';
 const templateMetaCache = new Map();
 const generationConfigCache = new Map();
 let playbookCache = null;
@@ -329,13 +331,15 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
 
 function buildTemplateValueMap(article, content) {
     const sourceImage = getSourceImage(article);
+    // Use generated background if available (set by processArticle via Gemini)
+    const effectiveImage = article._generatedBackground || sourceImage;
     return {
         headline: content.headline_ru || '',
         headline2: content.headline2_ru || '',
         body: content.caption_ru || '',
         conclusion: content.hashtags || '',
-        imageUrl: sourceImage,
-        image_url: sourceImage,
+        imageUrl: effectiveImage,
+        image_url: effectiveImage,
         sourceImage,
         source_name: article.source_name || '',
         sourceName: article.source_name || '',
@@ -345,8 +349,8 @@ function buildTemplateValueMap(article, content) {
         rawTitle: article.raw_title || '',
         rawSummary: article.raw_summary || '',
         imagePrompt: content.image_prompt || '',
-        generatedImage: article.generated_image || '',
-        generated_image: article.generated_image || ''
+        generatedImage: article._generatedBackground || article.generated_image || '',
+        generated_image: article._generatedBackground || article.generated_image || ''
     };
 }
 
@@ -551,7 +555,7 @@ async function markArticleFailed(articleId, message) {
     }
 }
 
-async function saveToBrain(articleId, content, coverImage, templateMeta, renderInfo, generationConfig) {
+async function saveToBrain(articleId, content, coverImage, templateMeta, renderInfo, generationConfig, generatedBackground) {
     return brainFetch(`/api/articles/${articleId}/generated`, {
         method: 'POST',
         body: JSON.stringify({
@@ -561,7 +565,7 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
             conclusion: content.hashtags || '',
             telegram_caption: content.caption_ru || '',
             image_prompt: content.image_prompt || '',
-            generated_image: '',
+            generated_image: generatedBackground || '',
             cover_image: coverImage,
             card_image: coverImage,
             template_id: templateMeta?.id || INSTAGRAM_TEMPLATE_ID,
@@ -585,6 +589,59 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
     });
 }
 
+async function generateBackgroundImage(imagePrompt) {
+    if (!GEMINI_API_KEY) {
+        logger.warn('GEMINI_API_KEY not set, skipping image generation');
+        return null;
+    }
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+    const enhancedPrompt = `Generate a photorealistic editorial image for a news Instagram post. ${imagePrompt}. Style: cinematic, high contrast, clean composition, 3:4 aspect ratio, no text overlays, no watermarks, no logos.`;
+
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+
+        const response = await fetch(url, {
+            method: 'POST',
+            signal: controller.signal,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: enhancedPrompt }] }],
+                generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+            })
+        });
+
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+            const err = await response.text();
+            logger.error({ status: response.status, error: err }, 'Gemini image generation failed');
+            return null;
+        }
+
+        const data = await response.json();
+        const parts = data.candidates?.[0]?.content?.parts || [];
+
+        for (const part of parts) {
+            if (part.inlineData) {
+                // Upload base64 PNG to Cloudinary
+                const imageBuffer = Buffer.from(part.inlineData.data, 'base64');
+                const cloudinaryUrl = await uploadBufferToCloudinary(imageBuffer);
+                logger.info({ prompt: imagePrompt.slice(0, 50) }, 'Gemini image generated and uploaded');
+                return cloudinaryUrl;
+            }
+        }
+
+        logger.warn('Gemini returned no image data');
+        return null;
+    } catch (error) {
+        logger.error({ error: error.message }, 'Gemini image generation error');
+        return null;
+    }
+}
+
 async function generateContent(article, generationConfig = null) {
     const playbook = normalizePlaybook(generationConfig?.playbook);
     const imageAssessment = assessSourceImage(article);
@@ -594,39 +651,37 @@ async function generateContent(article, generationConfig = null) {
     }
 
     const systemPrompt = [
-        '?? AI-?????????? ?????????? Instagram ??????.',
-        '?????? ?????? ?? ???????.',
-        '?????? ?????????? ?????, ???????? ?????? ?? ??????.',
-        '????? ???? ??????? feed-???? ? ????? ?????????.',
-        '?????????: ?? 6 ????, ???????.',
-        '????????????: ?? 6 ????.',
-        'Caption: 3-5 ???????????, ????? ????, ??? ????.',
-        '????? ?????? ???????? JSON ??? markdown.',
-        `Marketing playbook: ${JSON.stringify({
+        'Ты AI-редактор новостного Instagram канала.',
+        'Пишешь только на русском языке.',
+        'СТРОГИЕ ПРАВИЛА ДЛЯ ЗАГОЛОВКОВ:',
+        '- headline_ru: МАКСИМУМ 25 символов. Это 2-4 слова. КАПСОМ. Пример: "ЭЛОН МАСК УХОДИТ" или "APPLE МЕНЯЕТ ВСЁ"',
+        '- headline2_ru: МАКСИМУМ 30 символов. Это 3-5 слов. Пример: "Компания объявила о решении" или "Что изменится для всех"',
+        '- Если заголовок длиннее лимита — СОКРАТИ. Лучше короче и ударнее.',
+        '- НЕ используй кавычки, двоеточия, тире в заголовках.',
+        'Caption: 3-5 предложений, понятный тон, без хайпа.',
+        'image_prompt: Опиши сцену для генерации фоновой картинки. Фотореалистично, драматичное освещение, без текста, без водяных знаков. На английском языке.',
+        'Всегда отвечай чистым JSON без markdown.',
+        `Правила из playbook: ${JSON.stringify({
             headlineRules: playbook.headlineRules || [],
             subheadlineRules: playbook.subheadlineRules || [],
             captionRules: playbook.captionRules || [],
-            imageDecisionRules: playbook.imageDecisionRules || [],
             examples: playbook.examples || []
         })}`
-    ].join(' ');
+    ].join('\n');
 
-    const userPrompt = `??????:
-?????????: ${article.raw_title}
-??????? ????????: ${article.raw_summary || ''}
-?????: ${(article.raw_text || '').slice(0, 6000)}
-???? ????????: ${article.top_image ? 'yes' : 'no'}
-?????? ???????? ????????: ${JSON.stringify(imageAssessment)}
+    const userPrompt = `Статья:
+Заголовок: ${article.raw_title}
+Краткое описание: ${article.raw_summary || ''}
+Текст: ${(article.raw_text || '').slice(0, 4000)}
 
-????? JSON:
+Ответь JSON:
 {
-  "headline_ru": "??????? ?? 6 ????",
-  "headline2_ru": "???????????? ?? 6 ????",
-  "caption_ru": "3-5 ??????????? ??? Instagram ????? ??? ????????",
-  "hashtags": "#???1 #???2 #???3",
-  "use_original_image": true,
-  "image_prompt": "???? ???????? ?????? ?????, ???????? ?????? ??? ????????? ???????????, ????? ?????? ??????",
-  "angle": "????? ???? ?????? ??????: shock | useful | breakthrough | explain"
+  "headline_ru": "МАКС 25 СИМВОЛОВ КАПСОМ",
+  "headline2_ru": "Макс 30 символов",
+  "caption_ru": "3-5 предложений для Instagram поста без хэштегов",
+  "hashtags": "#тег1 #тег2 #тег3 #тег4 #тег5",
+  "image_prompt": "English prompt for background image generation. Photorealistic, dramatic lighting, cinematic composition, no text, no watermark. Describe the key scene related to: ${article.raw_title}",
+  "angle": "shock | useful | breakthrough | explain"
 }`;
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -764,10 +819,53 @@ async function uploadToCloudinary(imageBuffer, mimeType = 'image/png') {
     return data.secure_url;
 }
 
+async function uploadBufferToCloudinary(buffer) {
+    const timestamp = Math.floor(Date.now() / 1000);
+    const folder = 'adilflow_instagram';
+
+    const formData = new FormData();
+    const blob = new Blob([buffer], { type: 'image/png' });
+    formData.append('file', blob, 'generated.png');
+    formData.append('folder', folder);
+    formData.append('timestamp', timestamp.toString());
+
+    if (CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
+        const crypto = require('crypto');
+        const paramsToSign = `folder=${folder}&timestamp=${timestamp}`;
+        const signature = crypto.createHash('sha1').update(paramsToSign + CLOUDINARY_API_SECRET).digest('hex');
+        formData.append('api_key', CLOUDINARY_API_KEY);
+        formData.append('signature', signature);
+    } else {
+        formData.append('upload_preset', CLOUDINARY_PRESET);
+    }
+
+    const resp = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
+        method: 'POST',
+        body: formData
+    });
+
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error?.message || 'Cloudinary upload failed');
+    return result.secure_url;
+}
+
 async function processArticle(article, generationConfig) {
     const activeConfig = generationConfig || await fetchGenerationConfig(article.niche || 'health_medicine');
     const templateId = activeConfig?.templateId || INSTAGRAM_TEMPLATE_ID;
     const content = await generateContent(article, activeConfig);
+
+    // If no source image or image assessment says don't use original, generate one
+    let backgroundImage = getSourceImage(article);
+    if (!backgroundImage && content.image_prompt) {
+        backgroundImage = await generateBackgroundImage(content.image_prompt);
+    }
+    if (!backgroundImage) {
+        backgroundImage = 'https://images.unsplash.com/photo-1504711434969-e33886168d8c?w=1080'; // fallback
+    }
+
+    // Store generated background so buildTemplateValueMap can use it
+    article._generatedBackground = backgroundImage;
+
     const templateMeta = await fetchTemplateMeta(templateId);
     const prepared = await prepareTemplateRender(article, content, templateMeta);
 
@@ -779,7 +877,7 @@ async function processArticle(article, generationConfig) {
     }
 
     const { coverImage } = await renderCover(article, prepared.content, templateMeta);
-    await saveToBrain(article.id, prepared.content, coverImage, templateMeta, prepared.renderInfo, activeConfig);
+    await saveToBrain(article.id, prepared.content, coverImage, templateMeta, prepared.renderInfo, activeConfig, article._generatedBackground);
 
     return {
         id: article.id,
