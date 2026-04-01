@@ -597,7 +597,22 @@ async function generateBackgroundImage(imagePrompt) {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
-    const enhancedPrompt = `Generate a photorealistic editorial image for a news Instagram post. ${imagePrompt}. Style: cinematic, high contrast, clean composition, 3:4 aspect ratio, no text overlays, no watermarks, no logos.`;
+    const enhancedPrompt = [
+      `Generate a premium editorial photograph for an Instagram news post.`,
+      `Scene: ${imagePrompt}`,
+      `Style requirements:`,
+      `- Photorealistic, shot on Sony A7III or Canon R5`,
+      `- Cinematic color grading with dramatic lighting`,
+      `- Shallow depth of field, bokeh background`,
+      `- Dark moody atmosphere, deep shadows with accent lighting`,
+      `- If a person is the subject: close-up portrait, eye-level, professional lighting`,
+      `- If technology/product: dramatic product shot with rim lighting`,
+      `- If event/scene: wide angle establishing shot with leading lines`,
+      `- Aspect ratio 3:4 vertical (portrait orientation)`,
+      `- ABSOLUTELY NO text, watermarks, logos, UI elements, or overlays`,
+      `- Clean negative space in the lower third (text will be placed there)`,
+      `- High contrast, rich colors, magazine-quality editorial photography`
+    ].join('\n');
 
     try {
         const controller = new AbortController();
@@ -658,6 +673,11 @@ async function generateContent(article, generationConfig = null) {
         '- headline2_ru: МАКСИМУМ 30 символов. Это 3-5 слов. Пример: "Компания объявила о решении" или "Что изменится для всех"',
         '- Если заголовок длиннее лимита — СОКРАТИ. Лучше короче и ударнее.',
         '- НЕ используй кавычки, двоеточия, тире в заголовках.',
+        'ВЫДЕЛЕНИЕ КЛЮЧЕВЫХ СЛОВ:',
+        '- В headline_ru оберни 1-2 самых важных/шокирующих слова в **двойные звёздочки**',
+        '- Пример: "TESLA **РУХНУЛА** НА БИРЖЕ" или "**APPLE** МЕНЯЕТ ВСЁ"',
+        '- Выделяй: имена, числа, шокирующие глаголы, ключевой факт',
+        '- В headline2_ru тоже можно выделить 1 слово если уместно',
         'Caption: 3-5 предложений, понятный тон, без хайпа.',
         'image_prompt: Опиши сцену для генерации фоновой картинки. Фотореалистично, драматичное освещение, без текста, без водяных знаков. На английском языке.',
         'Всегда отвечай чистым JSON без markdown.',
@@ -676,8 +696,8 @@ async function generateContent(article, generationConfig = null) {
 
 Ответь JSON:
 {
-  "headline_ru": "МАКС 25 СИМВОЛОВ КАПСОМ",
-  "headline2_ru": "Макс 30 символов",
+  "headline_ru": "МАКС 25 СИМВОЛОВ **КЛЮЧЕВОЕ** СЛОВО КАПСОМ",
+  "headline2_ru": "Макс 30 символов **выделение**",
   "caption_ru": "3-5 предложений для Instagram поста без хэштегов",
   "hashtags": "#тег1 #тег2 #тег3 #тег4 #тег5",
   "image_prompt": "English prompt for background image generation. Photorealistic, dramatic lighting, cinematic composition, no text, no watermark. Describe the key scene related to: ${article.raw_title}",
