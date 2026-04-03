@@ -340,6 +340,7 @@ function buildTemplateValueMap(article, content) {
         conclusion: content.hashtags || '',
         imageUrl: effectiveImage,
         image_url: effectiveImage,
+        imageUrl2: sourceImage || effectiveImage,
         sourceImage,
         source_name: article.source_name || '',
         sourceName: article.source_name || '',
