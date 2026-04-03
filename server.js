@@ -314,8 +314,8 @@ function buildImagePrompt(article, angle, playbook) {
 
 function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     const merged = { ...buildFallbackContent(article), ...(content || {}) };
-    merged.headline_ru = truncateWords((merged.headline_ru || '').toUpperCase(), 6) || 'ВАЖНАЯ НОВОСТЬ';
-    merged.headline2_ru = truncateWords(merged.headline2_ru || '', 6);
+    merged.headline_ru = (merged.headline_ru || '').toUpperCase() || 'ВАЖНАЯ НОВОСТЬ';
+    merged.headline2_ru = merged.headline2_ru || '';
     merged.caption_ru = (merged.caption_ru || fallbackCaption(article) || article.raw_title || '').trim();
     merged.hashtags = merged.hashtags || '#новости #инстаграм #медиа #обзор';
     merged.image_assessment = imageAssessment;
@@ -446,22 +446,8 @@ async function enforceTemplateFit(article, content, templateMeta) {
             return { content: nextContent, renderInfo, fit };
         }
 
-        let changed = false;
-        for (const issue of fit.issues || []) {
-            const field = editableMap[issue.variable];
-            if (!field || isBlank(nextContent[field])) continue;
-
-            const currentWords = String(nextContent[field]).trim().split(/\s+/).filter(Boolean);
-            if (currentWords.length <= 2) continue;
-
-            const targetWords = Math.max(2, currentWords.length - 1);
-            nextContent[field] = truncateWords(nextContent[field], targetWords);
-            changed = true;
-        }
-
-        if (!changed) {
-            return { content: nextContent, renderInfo, fit };
-        }
+        // Don't truncate headlines — let the template wrap text naturally
+        return { content: nextContent, renderInfo, fit };
     }
 
     const finalRenderInfo = buildRenderPayload(article, nextContent, templateMeta);
@@ -668,31 +654,33 @@ async function generateContent(article, generationConfig = null) {
 
     const systemPrompt = [
         'Ты главный редактор вирусного Instagram новостного канала с 2М подписчиков.',
-        'Твои заголовки ОСТАНАВЛИВАЮТ скроллинг. Они провокационные, эмоциональные, конкретные.',
-        'Пишешь на русском языке. КАПСОМ.',
+        'Твоя задача — писать ДЛИННЫЕ цепляющие заголовки которые ОСТАНАВЛИВАЮТ скроллинг.',
+        'Пишешь на русском языке. Весь headline КАПСОМ.',
         '',
         'ПРАВИЛА ЗАГОЛОВКОВ (headline_ru):',
-        '- МАКСИМУМ 40 символов (3-6 слов). Весь текст КАПСОМ.',
-        '- Начинай с ДЕЙСТВИЯ или ШОКИРУЮЩЕГО факта, не с названия компании',
-        '- Используй сильные глаголы: УНИЧТОЖИЛ, СЛОМАЛ, ШОКИРОВАЛ, РАЗОРИЛ, ОБОГНАЛ, УКРАЛ, ЗАПРЕТИЛ',
-        '- Добавляй конкретику: цифры, имена, последствия',
-        '- ПЛОХО: "APPLE ВЫПУСТИЛ НОВЫЙ ПРОДУКТ" — скучно',
-        '- ХОРОШО: "APPLE **УНИЧТОЖИЛ** КОНКУРЕНТОВ ОДНИМ ЧИПОМ" — цепляет',
-        '- ХОРОШО: "**$100 МИЛЛИОНОВ** ЗА 2 МЕСЯЦА НА РЕКЛАМЕ" — конкретика',
-        '- ХОРОШО: "УТЕЧКА ПОКАЗАЛА **СЕКРЕТНУЮ** МОДЕЛЬ OPENAI" — интрига',
+        '- Длина: 50-90 символов (8-15 слов). Заголовок должен ЗАПОЛНЯТЬ 3-4 строки на картинке.',
+        '- Весь текст КАПСОМ.',
+        '- Раскрой СУТЬ новости полностью в одном заголовке. Читатель должен понять ЧТО произошло.',
+        '- Используй конкретику: цифры, имена, суммы, последствия.',
+        '- Используй сильные глаголы: УНИЧТОЖИЛ, ОБОГНАЛ, УКРАЛ, ЗАПРЕТИЛ, ШОКИРОВАЛ, ОБВИНИЛ.',
         '',
-        'ВЫДЕЛЕНИЕ (обязательно):',
-        '- Оберни 1-3 самых ударных слова в **двойные звёздочки**',
-        '- Выделяй: числа, шокирующие глаголы, имена, ключевой факт',
-        '- Пример: "TESLA **РУХНУЛА НА 15%** ПОСЛЕ СЛОВ МАСКА"',
-        '- Пример: "GOOGLE **ТАЙНО** СОЗДАЛ СУПЕРИНТЕЛЛЕКТ"',
+        'ПРИМЕРЫ ИДЕАЛЬНЫХ ЗАГОЛОВКОВ:',
+        '- "OPENAI ПРИВЛЕК **$122 МИЛЛИАРДА** ДЛЯ УСКОРЕНИЯ НОВОЙ ФАЗЫ ИИ"',
+        '- "МОДЕЛИ ИИ **ЛГУТ И ВОРУЮТ** ЧТОБЫ ЗАЩИТИТЬ ДРУГИЕ МОДЕЛИ ОТ УДАЛЕНИЯ"',
+        '- "APPLE ТАЙНО ПЛАНИРУЕТ **ПОДКЛЮЧИТЬ SIRI** К НЕСКОЛЬКИМ ИИ АССИСТЕНТАМ"',
+        '- "УТЕЧКА ПЕРЕПИСКИ ПОКАЗАЛА КАК **ЭЛОН МАСК** ПРОСИЛ ЦУКЕРБЕРГА КУПИТЬ OPENAI"',
+        '- "GOOGLE НАШЁЛ СПОСОБ **СЖАТЬ ПАМЯТЬ ИИ** БЕЗ ПОТЕРИ ТОЧНОСТИ"',
+        '- "REDDIT ПРИДУМАЛ ПЛАН КАК **ОТДЕЛИТЬ БОТОВ** ОТ ЛЮДЕЙ НА САЙТЕ"',
         '',
-        'ПОДЗАГОЛОВОК (headline2_ru):',
-        '- Максимум 35 символов. Дополняет headline деталью.',
-        '- Можно выделить 1 слово. Не повторяй слова из headline.',
+        'ВЫДЕЛЕНИЕ КЛЮЧЕВЫХ СЛОВ (обязательно):',
+        '- Оберни 2-5 самых важных слов в **двойные звёздочки**',
+        '- Выделяй: суммы денег, шокирующие глаголы, имена, ключевой факт',
+        '- Выделенные слова будут отображаться АКЦЕНТНЫМ ЦВЕТОМ на картинке',
         '',
-        'Caption: 3-5 коротких предложений. Объясни почему это важно. Тон уверенный, живой.',
-        'image_prompt: На английском. Опиши драматичную фотореалистичную сцену.',
+        'headline2_ru НЕ НУЖЕН. Оставь пустым.',
+        '',
+        'Caption: 3-5 предложений. Объясни почему это важно. Тон уверенный.',
+        'image_prompt: На английском. Фотореалистичная драматичная сцена связанная с новостью. БЕЗ текста.',
         'Всегда отвечай чистым JSON без markdown.',
         `Правила из playbook: ${JSON.stringify({
             headlineRules: playbook.headlineRules || [],
@@ -709,11 +697,11 @@ async function generateContent(article, generationConfig = null) {
 
 Ответь JSON:
 {
-  "headline_ru": "МАКС 25 СИМВОЛОВ **КЛЮЧЕВОЕ** СЛОВО КАПСОМ",
-  "headline2_ru": "Макс 30 символов **выделение**",
+  "headline_ru": "ДЛИННЫЙ ЗАГОЛОВОК 50-90 СИМВОЛОВ КАПСОМ С **ВЫДЕЛЕННЫМИ** КЛЮЧЕВЫМИ СЛОВАМИ КОТОРЫЙ ПОЛНОСТЬЮ РАСКРЫВАЕТ СУТЬ НОВОСТИ",
+  "headline2_ru": "",
   "caption_ru": "3-5 предложений для Instagram поста без хэштегов",
   "hashtags": "#тег1 #тег2 #тег3 #тег4 #тег5",
-  "image_prompt": "English prompt for background image generation. Photorealistic, dramatic lighting, cinematic composition, no text, no watermark. Describe the key scene related to: ${article.raw_title}",
+  "image_prompt": "Photorealistic dramatic photo related to: ${article.raw_title}. Cinematic lighting, shallow depth of field, dark moody atmosphere. If about a person: close-up portrait. If about technology: dramatic product shot. NO text, NO watermarks, NO logos.",
   "angle": "shock | useful | breakthrough | explain"
 }`;
 
@@ -902,11 +890,9 @@ async function processArticle(article, generationConfig) {
     const templateMeta = await fetchTemplateMeta(templateId);
     const prepared = await prepareTemplateRender(article, content, templateMeta);
 
+    // Don't block on fit-check — let renderer handle text wrapping naturally
     if (prepared.renderInfo.fit?.ok === false) {
-        const issueSummary = (prepared.renderInfo.fit.issues || [])
-            .map((issue) => issue.variable || issue.layerName || 'unknown')
-            .join(', ');
-        throw new Error(`Template fit-check failed for ${templateMeta?.id || templateId}: ${issueSummary}`);
+        logger.warn({ template: templateMeta?.id, issues: prepared.renderInfo.fit.issues }, 'Fit-check warning (proceeding anyway)');
     }
 
     const { coverImage } = await renderCover(article, prepared.content, templateMeta);
