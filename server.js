@@ -340,7 +340,7 @@ function buildTemplateValueMap(article, content) {
         conclusion: content.hashtags || '',
         imageUrl: effectiveImage,
         image_url: effectiveImage,
-        imageUrl2: sourceImage || '',
+        imageUrl2: (article._generatedBackground && sourceImage) ? sourceImage : '',
         sourceImage,
         source_name: article.source_name || '',
         sourceName: article.source_name || '',
@@ -956,13 +956,13 @@ app.get('/api/debug-auth', (req, res) => {
     const key = raw.replace(/^Bearer\s+/i, '').trim();
     res.json({
         generator_key_ok: !!GENERATOR_API_KEY,
-        generator_key_len: GENERATOR_API_KEY.length,
-        generator_key_prefix: GENERATOR_API_KEY.slice(0, 10),
         brain_url: BRAIN_URL,
-        brain_key_len: BRAIN_API_KEY.length,
-        brain_key_prefix: BRAIN_API_KEY.slice(0, 10),
-        received_len: key.length,
-        received_prefix: key.slice(0, 10),
+        brain_key_ok: !!BRAIN_API_KEY,
+        gemini_key_ok: !!GEMINI_API_KEY,
+        gemini_key_len: GEMINI_API_KEY.length,
+        gemini_key_prefix: GEMINI_API_KEY.slice(0, 8),
+        gemini_model: GEMINI_MODEL,
+        cloudinary_ok: !!CLOUDINARY_API_KEY && !!CLOUDINARY_API_SECRET,
         match: key === GENERATOR_API_KEY
     });
 });
