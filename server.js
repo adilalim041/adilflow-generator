@@ -644,6 +644,31 @@ async function generateBackgroundImage(imagePrompt) {
     }
 }
 
+// Temporary test endpoint for Gemini
+app.get('/api/test-gemini', async (req, res) => {
+    if (!GEMINI_API_KEY) return res.json({ error: 'No GEMINI_API_KEY' });
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: 'Generate a simple photo of a sunset over mountains' }] }],
+                generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+            })
+        });
+        const text = await response.text();
+        if (!response.ok) return res.json({ error: 'Gemini failed', status: response.status, body: text.slice(0, 500) });
+        const data = JSON.parse(text);
+        const parts = data.candidates?.[0]?.content?.parts || [];
+        const hasImage = parts.some(p => p.inlineData);
+        const textParts = parts.filter(p => p.text).map(p => p.text);
+        res.json({ success: true, hasImage, textParts, partsCount: parts.length });
+    } catch (e) {
+        res.json({ error: e.message });
+    }
+});
+
 async function generateContent(article, generationConfig = null) {
     const playbook = normalizePlaybook(generationConfig?.playbook);
     const imageAssessment = assessSourceImage(article);
