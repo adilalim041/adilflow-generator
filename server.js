@@ -875,13 +875,14 @@ async function processArticle(article, generationConfig) {
     const templateId = activeConfig?.templateId || INSTAGRAM_TEMPLATE_ID;
     const content = await generateContent(article, activeConfig);
 
-    // If no source image or image assessment says don't use original, generate one
-    let backgroundImage = getSourceImage(article);
-    if (!backgroundImage && content.image_prompt) {
+    // ALWAYS generate background with Gemini (source image goes to circle overlay)
+    let backgroundImage = null;
+    if (content.image_prompt && GEMINI_API_KEY) {
         backgroundImage = await generateBackgroundImage(content.image_prompt);
     }
     if (!backgroundImage) {
-        backgroundImage = 'https://images.unsplash.com/photo-1504711434969-e33886168d8c?w=1080'; // fallback
+        // Fallback: use source image as background if Gemini fails
+        backgroundImage = getSourceImage(article) || 'https://images.unsplash.com/photo-1504711434969-e33886168d8c?w=1080';
     }
 
     // Store generated background so buildTemplateValueMap can use it
