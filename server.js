@@ -24,6 +24,25 @@ const pinoHttp = require('pino-http');
 
 const logger = pino({ name: 'adilflow-generator' });
 
+// ═══════════════════════════════════════
+// ESM DEPS: p-retry (retry with backoff) + p-queue (concurrency control)
+// ═══════════════════════════════════════
+let pRetry, AbortError;
+let geminiQueue, openaiQueue, cloudinaryQueue;
+
+const esmReady = (async () => {
+    const [pRetryMod, PQueueMod] = await Promise.all([
+        import('p-retry'),
+        import('p-queue')
+    ]);
+    pRetry = pRetryMod.default;
+    AbortError = pRetryMod.AbortError;
+    const PQueue = PQueueMod.default;
+    geminiQueue = new PQueue({ concurrency: 2 });
+    openaiQueue = new PQueue({ concurrency: 3 });
+    cloudinaryQueue = new PQueue({ concurrency: 3 });
+})();
+
 function validate(schema) {
     return (req, res, next) => {
         const result = schema.safeParse(req.body);
@@ -187,7 +206,7 @@ function loadGeneratorPlaybook() {
         const raw = fs.readFileSync(GENERATOR_PLAYBOOK_PATH, 'utf8');
         playbookCache = JSON.parse(raw);
     } catch (error) {
-        console.warn(`[PLAYBOOK] Using built-in defaults: ${error.message}`);
+        logger.warn({ error: error.message }, 'Playbook load failed, using built-in defaults');
         playbookCache = {
             name: 'Built-in Instagram News Core',
             headlineRules: [
@@ -378,7 +397,7 @@ async function fetchTemplateMeta(templateId) {
             }
         }
     } catch (error) {
-        console.warn(`[TEMPLATE] Could not fetch metadata for ${templateId}: ${error.message}`);
+        logger.warn({ templateId, error: error.message }, 'Could not fetch template metadata');
     }
 
     const fallbackMeta = {
@@ -515,7 +534,7 @@ async function fetchGenerationConfig(niche) {
         generationConfigCache.set(cacheKey, resolved);
         return resolved;
     } catch (error) {
-        console.warn(`[CONFIG] Falling back to local defaults for niche ${niche}: ${error.message}`);
+        logger.warn({ niche, error: error.message }, 'Config fallback to local defaults');
         const resolved = {
             source: 'fallback',
             channelProfile: null,
@@ -538,7 +557,7 @@ async function markArticleFailed(articleId, message) {
             })
         });
     } catch (error) {
-        console.error(`[FAILED] Could not release article ${articleId}: ${error.message}`);
+        logger.error({ articleId, error: error.message }, 'Could not release failed article');
     }
 }
 
@@ -601,45 +620,54 @@ async function generateBackgroundImage(imagePrompt) {
       `- High contrast, rich colors, magazine-quality editorial photography`
     ].join('\n');
 
+    const start = Date.now();
     try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 30000);
+        const data = await geminiQueue.add(() => pRetry(async () => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 30000);
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    signal: controller.signal,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: enhancedPrompt }] }],
+                        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+                    })
+                });
+                if (!response.ok) {
+                    const errText = await response.text();
+                    if (response.status >= 400 && response.status < 500) {
+                        throw new AbortError(`Gemini ${response.status}: ${errText.slice(0, 200)}`);
+                    }
+                    throw new Error(`Gemini ${response.status}: ${errText.slice(0, 200)}`);
+                }
+                return response.json();
+            } finally {
+                clearTimeout(timeout);
+            }
+        }, {
+            retries: 3,
+            minTimeout: 2000,
+            onFailedAttempt: (err) => {
+                logger.warn({ provider: 'gemini', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message, prompt: imagePrompt.slice(0, 50) }, 'Gemini retry');
+            }
+        }));
 
-        const response = await fetch(url, {
-            method: 'POST',
-            signal: controller.signal,
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: enhancedPrompt }] }],
-                generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
-            })
-        });
-
-        clearTimeout(timeout);
-
-        if (!response.ok) {
-            const err = await response.text();
-            logger.error({ status: response.status, error: err }, 'Gemini image generation failed');
-            return null;
-        }
-
-        const data = await response.json();
         const parts = data.candidates?.[0]?.content?.parts || [];
-
         for (const part of parts) {
             if (part.inlineData) {
-                // Upload base64 PNG to Cloudinary
                 const imageBuffer = Buffer.from(part.inlineData.data, 'base64');
                 const cloudinaryUrl = await uploadBufferToCloudinary(imageBuffer);
-                logger.info({ prompt: imagePrompt.slice(0, 50) }, 'Gemini image generated and uploaded');
+                logger.info({ provider: 'gemini', latencyMs: Date.now() - start, prompt: imagePrompt.slice(0, 50) }, 'Gemini image generated and uploaded');
                 return cloudinaryUrl;
             }
         }
 
-        logger.warn('Gemini returned no image data');
+        logger.warn({ provider: 'gemini', latencyMs: Date.now() - start }, 'Gemini returned no image data');
         return null;
     } catch (error) {
-        logger.error({ error: error.message }, 'Gemini image generation error');
+        logger.error({ provider: 'gemini', latencyMs: Date.now() - start, error: error.message, prompt: imagePrompt.slice(0, 50) }, 'Gemini image generation failed');
         return null;
     }
 }
@@ -730,27 +758,45 @@ async function generateContent(article, generationConfig = null) {
   "angle": "shock | useful | breakthrough | explain"
 }`;
 
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-            Authorization: `Bearer ${OPENAI_API_KEY}` ,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            model: OPENAI_MODEL,
-            messages: [
-                { role: 'system', content: systemPrompt },
-                { role: 'user', content: userPrompt }
-            ],
-            temperature: 0.5,
-            max_tokens: 700,
-            response_format: { type: 'json_object' }
-        })
-    });
-
-    const data = await response.json();
-    if (!response.ok) {
-        console.warn(`[OPENAI] Falling back to local copy for article ${article.id}: ${data.error?.message || response.status}`);
+    const start = Date.now();
+    let data;
+    try {
+        data = await openaiQueue.add(() => pRetry(async () => {
+            const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${OPENAI_API_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: OPENAI_MODEL,
+                    messages: [
+                        { role: 'system', content: systemPrompt },
+                        { role: 'user', content: userPrompt }
+                    ],
+                    temperature: 0.5,
+                    max_tokens: 700,
+                    response_format: { type: 'json_object' }
+                })
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                if (response.status >= 400 && response.status < 500) {
+                    throw new AbortError(`OpenAI ${response.status}: ${result.error?.message || 'Client error'}`);
+                }
+                throw new Error(`OpenAI ${response.status}: ${result.error?.message || 'Server error'}`);
+            }
+            return result;
+        }, {
+            retries: 3,
+            minTimeout: 1000,
+            onFailedAttempt: (err) => {
+                logger.warn({ provider: 'openai', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message, articleId: article.id }, 'OpenAI retry');
+            }
+        }));
+        logger.info({ provider: 'openai', latencyMs: Date.now() - start, articleId: article.id, model: OPENAI_MODEL }, 'OpenAI content generated');
+    } catch (error) {
+        logger.warn({ provider: 'openai', latencyMs: Date.now() - start, error: error.message, articleId: article.id }, 'OpenAI failed, using fallback');
         return finalizeGeneratedContent(article, {}, playbook, imageAssessment);
     }
 
@@ -758,7 +804,7 @@ async function generateContent(article, generationConfig = null) {
     try {
         return finalizeGeneratedContent(article, extractJson(text), playbook, imageAssessment);
     } catch (error) {
-        console.warn(`[OPENAI] Invalid JSON for article ${article.id}, using fallback: ${error.message}`);
+        logger.warn({ provider: 'openai', articleId: article.id, error: error.message }, 'OpenAI returned invalid JSON, using fallback');
         return finalizeGeneratedContent(article, {}, playbook, imageAssessment);
     }
 }
@@ -831,68 +877,92 @@ async function prepareTemplateRender(article, content, templateMeta) {
 }
 
 async function uploadToCloudinary(imageBuffer, mimeType = 'image/png') {
-    const formData = new FormData();
-    formData.append('file', new Blob([imageBuffer], { type: mimeType }));
-    formData.append('folder', 'adilflow_instagram');
+    const start = Date.now();
+    const result = await cloudinaryQueue.add(() => pRetry(async () => {
+        const formData = new FormData();
+        formData.append('file', new Blob([imageBuffer], { type: mimeType }));
+        formData.append('folder', 'adilflow_instagram');
 
-    if (CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
-        // Signed upload — secure, requires API key + secret
-        const crypto = require('crypto');
-        const timestamp = Math.floor(Date.now() / 1000);
-        const paramsToSign = `folder=adilflow_instagram&timestamp=${timestamp}`;
-        const signature = crypto.createHash('sha1')
-            .update(paramsToSign + CLOUDINARY_API_SECRET)
-            .digest('hex');
-        formData.append('timestamp', String(timestamp));
-        formData.append('api_key', CLOUDINARY_API_KEY);
-        formData.append('signature', signature);
-    } else {
-        // Fallback to unsigned upload (for local dev only)
-        console.warn('[Cloudinary] WARNING: Using unsigned upload. Set CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET for production.');
-        formData.append('upload_preset', CLOUDINARY_PRESET);
-    }
+        if (CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
+            const crypto = require('crypto');
+            const timestamp = Math.floor(Date.now() / 1000);
+            const paramsToSign = `folder=adilflow_instagram&timestamp=${timestamp}`;
+            const signature = crypto.createHash('sha1')
+                .update(paramsToSign + CLOUDINARY_API_SECRET)
+                .digest('hex');
+            formData.append('timestamp', String(timestamp));
+            formData.append('api_key', CLOUDINARY_API_KEY);
+            formData.append('signature', signature);
+        } else {
+            logger.warn({ provider: 'cloudinary' }, 'Using unsigned upload — set CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET for production');
+            formData.append('upload_preset', CLOUDINARY_PRESET);
+        }
 
-    const response = await fetch(
-        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
-        { method: 'POST', body: formData }
-    );
-
-    const data = await response.json();
-    if (!response.ok || !data.secure_url) {
-        throw new Error(data.error?.message || 'Cloudinary upload failed');
-    }
-
-    return data.secure_url;
+        const response = await fetch(
+            `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+            { method: 'POST', body: formData }
+        );
+        const data = await response.json();
+        if (!response.ok || !data.secure_url) {
+            if (response.status >= 400 && response.status < 500) {
+                throw new AbortError(data.error?.message || `Cloudinary ${response.status}`);
+            }
+            throw new Error(data.error?.message || 'Cloudinary upload failed');
+        }
+        return data.secure_url;
+    }, {
+        retries: 3,
+        minTimeout: 1000,
+        onFailedAttempt: (err) => {
+            logger.warn({ provider: 'cloudinary', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message }, 'Cloudinary retry');
+        }
+    }));
+    logger.info({ provider: 'cloudinary', latencyMs: Date.now() - start }, 'Cloudinary upload ok');
+    return result;
 }
 
 async function uploadBufferToCloudinary(buffer) {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const folder = 'adilflow_instagram';
+    const start = Date.now();
+    const url = await cloudinaryQueue.add(() => pRetry(async () => {
+        const timestamp = Math.floor(Date.now() / 1000);
+        const folder = 'adilflow_instagram';
+        const formData = new FormData();
+        const blob = new Blob([buffer], { type: 'image/png' });
+        formData.append('file', blob, 'generated.png');
+        formData.append('folder', folder);
+        formData.append('timestamp', timestamp.toString());
 
-    const formData = new FormData();
-    const blob = new Blob([buffer], { type: 'image/png' });
-    formData.append('file', blob, 'generated.png');
-    formData.append('folder', folder);
-    formData.append('timestamp', timestamp.toString());
+        if (CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
+            const crypto = require('crypto');
+            const paramsToSign = `folder=${folder}&timestamp=${timestamp}`;
+            const signature = crypto.createHash('sha1').update(paramsToSign + CLOUDINARY_API_SECRET).digest('hex');
+            formData.append('api_key', CLOUDINARY_API_KEY);
+            formData.append('signature', signature);
+        } else {
+            formData.append('upload_preset', CLOUDINARY_PRESET);
+        }
 
-    if (CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET) {
-        const crypto = require('crypto');
-        const paramsToSign = `folder=${folder}&timestamp=${timestamp}`;
-        const signature = crypto.createHash('sha1').update(paramsToSign + CLOUDINARY_API_SECRET).digest('hex');
-        formData.append('api_key', CLOUDINARY_API_KEY);
-        formData.append('signature', signature);
-    } else {
-        formData.append('upload_preset', CLOUDINARY_PRESET);
-    }
-
-    const resp = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
-        method: 'POST',
-        body: formData
-    });
-
-    const result = await resp.json();
-    if (!resp.ok) throw new Error(result.error?.message || 'Cloudinary upload failed');
-    return result.secure_url;
+        const resp = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
+            method: 'POST',
+            body: formData
+        });
+        const result = await resp.json();
+        if (!resp.ok) {
+            if (resp.status >= 400 && resp.status < 500) {
+                throw new AbortError(result.error?.message || `Cloudinary ${resp.status}`);
+            }
+            throw new Error(result.error?.message || 'Cloudinary upload failed');
+        }
+        return result.secure_url;
+    }, {
+        retries: 3,
+        minTimeout: 1000,
+        onFailedAttempt: (err) => {
+            logger.warn({ provider: 'cloudinary', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message }, 'Cloudinary buffer retry');
+        }
+    }));
+    logger.info({ provider: 'cloudinary', latencyMs: Date.now() - start }, 'Cloudinary buffer upload ok');
+    return url;
 }
 
 async function processArticle(article, generationConfig) {
@@ -1006,11 +1076,11 @@ app.post('/api/generate', authMiddleware, validate(GenerateSchema), async (req, 
         const results = [];
         for (const article of articles) {
             try {
-                console.log(`[GENERATE] ${article.id} -> ${article.raw_title}`);
+                logger.info({ articleId: article.id, title: (article.raw_title || '').slice(0, 80) }, 'Processing article');
                 results.push(await processArticle(article, generationConfig));
                 await sleep(250);
             } catch (error) {
-                console.error(`[GENERATE] ${article.id} failed: ${error.message}`);
+                logger.error({ articleId: article.id, error: error.message }, 'Article generation failed');
                 await markArticleFailed(article.id, error.message);
                 results.push({
                     id: article.id,
@@ -1030,7 +1100,7 @@ app.post('/api/generate', authMiddleware, validate(GenerateSchema), async (req, 
             results
         });
     } catch (error) {
-        console.error(`[GENERATE ERROR] ${error.message}`);
+        logger.error({ error: error.message }, 'Generate endpoint error');
         res.status(500).json({ error: error.message });
     }
 });
@@ -1084,8 +1154,13 @@ if (process.env.SENTRY_DSN) {
 }
 
 const PORT = process.env.PORT || 3002;
-app.listen(PORT, () => {
-    logger.info(`AdilFlow Generator v2 on port ${PORT}`);
-    logger.info(`Brain: ${BRAIN_URL}`);
-    logger.info(`Render Service: ${RENDER_SERVICE_URL}`);
+esmReady.then(() => {
+    app.listen(PORT, () => {
+        logger.info(`AdilFlow Generator v2 on port ${PORT}`);
+        logger.info(`Brain: ${BRAIN_URL}`);
+        logger.info(`Render Service: ${RENDER_SERVICE_URL}`);
+    });
+}).catch((err) => {
+    logger.fatal({ error: err.message }, 'Failed to load ESM dependencies');
+    process.exit(1);
 });
