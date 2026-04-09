@@ -86,6 +86,78 @@ const generationConfigCache = new Map();
 let playbookCache = null;
 
 // ═══════════════════════════════════════
+// DEFAULT PROMPT CONSTANTS (fallbacks when playbook has no custom prompts)
+// ═══════════════════════════════════════
+
+const DEFAULT_SYSTEM_PROMPT = [
+    'Ты главный редактор вирусного Instagram новостного канала с 2М подписчиков.',
+    'Твоя задача — писать ДЛИННЫЕ цепляющие заголовки которые ОСТАНАВЛИВАЮТ скроллинг.',
+    'Пишешь на русском языке. Весь headline КАПСОМ.',
+    '',
+    'ПРАВИЛА ЗАГОЛОВКОВ (headline_ru):',
+    '- Длина: 50-90 символов (8-15 слов). Заголовок должен ЗАПОЛНЯТЬ 3-4 строки на картинке.',
+    '- Весь текст КАПСОМ.',
+    '- Раскрой СУТЬ новости полностью в одном заголовке. Читатель должен понять ЧТО произошло.',
+    '- Используй конкретику: цифры, имена, суммы, последствия.',
+    '- Используй сильные глаголы: УНИЧТОЖИЛ, ОБОГНАЛ, УКРАЛ, ЗАПРЕТИЛ, ШОКИРОВАЛ, ОБВИНИЛ.',
+    '',
+    'ПРИМЕРЫ ИДЕАЛЬНЫХ ЗАГОЛОВКОВ:',
+    '- "OPENAI ПРИВЛЕК **$122 МИЛЛИАРДА** ДЛЯ УСКОРЕНИЯ НОВОЙ ФАЗЫ ИИ"',
+    '- "МОДЕЛИ ИИ **ЛГУТ И ВОРУЮТ** ЧТОБЫ ЗАЩИТИТЬ ДРУГИЕ МОДЕЛИ ОТ УДАЛЕНИЯ"',
+    '- "APPLE ТАЙНО ПЛАНИРУЕТ **ПОДКЛЮЧИТЬ SIRI** К НЕСКОЛЬКИМ ИИ АССИСТЕНТАМ"',
+    '- "УТЕЧКА ПЕРЕПИСКИ ПОКАЗАЛА КАК **ЭЛОН МАСК** ПРОСИЛ ЦУКЕРБЕРГА КУПИТЬ OPENAI"',
+    '- "GOOGLE НАШЁЛ СПОСОБ **СЖАТЬ ПАМЯТЬ ИИ** БЕЗ ПОТЕРИ ТОЧНОСТИ"',
+    '- "REDDIT ПРИДУМАЛ ПЛАН КАК **ОТДЕЛИТЬ БОТОВ** ОТ ЛЮДЕЙ НА САЙТЕ"',
+    '',
+    'ВЫДЕЛЕНИЕ КЛЮЧЕВЫХ СЛОВ (обязательно):',
+    '- Оберни 2-5 самых важных слов в **двойные звёздочки**',
+    '- Выделяй: суммы денег, шокирующие глаголы, имена, ключевой факт',
+    '- Выделенные слова будут отображаться АКЦЕНТНЫМ ЦВЕТОМ на картинке',
+    '',
+    'headline2_ru НЕ НУЖЕН. Оставь пустым.',
+    '',
+    'Caption: 3-5 предложений. Объясни почему это важно. Тон уверенный.',
+    'image_prompt: На английском. Фотореалистичная драматичная сцена связанная с новостью. БЕЗ текста.',
+    'Всегда отвечай чистым JSON без markdown.'
+].join('\n');
+
+function DEFAULT_USER_PROMPT(article) {
+    return `Статья:
+Заголовок: ${article.raw_title}
+Краткое описание: ${article.raw_summary || ''}
+Текст: ${(article.raw_text || '').slice(0, 4000)}
+
+Ответь JSON:
+{
+  "headline_ru": "ДЛИННЫЙ ЗАГОЛОВОК 50-90 СИМВОЛОВ КАПСОМ С **ВЫДЕЛЕННЫМИ** КЛЮЧЕВЫМИ СЛОВАМИ КОТОРЫЙ ПОЛНОСТЬЮ РАСКРЫВАЕТ СУТЬ НОВОСТИ",
+  "headline2_ru": "",
+  "caption_ru": "3-5 предложений для Instagram поста без хэштегов",
+  "hashtags": "#тег1 #тег2 #тег3 #тег4 #тег5",
+  "image_prompt": "Photorealistic dramatic photo related to: ${article.raw_title}. Cinematic lighting, shallow depth of field, dark moody atmosphere. If about a person: close-up portrait. If about technology: dramatic product shot. NO text, NO watermarks, NO logos.",
+  "angle": "shock | useful | breakthrough | explain"
+}`;
+}
+
+function DEFAULT_IMAGE_SYSTEM_PROMPT(imagePrompt) {
+    return [
+        `Generate a premium editorial photograph for an Instagram news post.`,
+        `Scene: ${imagePrompt}`,
+        `Style requirements:`,
+        `- Photorealistic, shot on Sony A7III or Canon R5`,
+        `- Cinematic color grading with dramatic lighting`,
+        `- Shallow depth of field, bokeh background`,
+        `- Dark moody atmosphere, deep shadows with accent lighting`,
+        `- If a person is the subject: close-up portrait, eye-level, professional lighting`,
+        `- If technology/product: dramatic product shot with rim lighting`,
+        `- If event/scene: wide angle establishing shot with leading lines`,
+        `- Aspect ratio 3:4 vertical (portrait orientation)`,
+        `- ABSOLUTELY NO text, watermarks, logos, UI elements, or overlays`,
+        `- Clean negative space in the lower third (text will be placed there)`,
+        `- High contrast, rich colors, magazine-quality editorial photography`
+    ].join('\n');
+}
+
+// ═══════════════════════════════════════
 // CIRCUIT BREAKER + RETRY
 // ═══════════════════════════════════════
 class CircuitBreaker {
@@ -248,7 +320,11 @@ function normalizePlaybook(playbook) {
         captionRules: playbook.captionRules || playbook.caption_rules || fallback.captionRules || [],
         imageDecisionRules: playbook.imageDecisionRules || playbook.image_rules || fallback.imageDecisionRules || [],
         imagePromptTemplate: playbook.imagePromptTemplate || playbook.image_prompt_template || fallback.imagePromptTemplate,
-        examples: playbook.examples || fallback.examples || []
+        examples: playbook.examples || fallback.examples || [],
+        // Prompt template fields from Brain playbooks
+        system_prompt: playbook.system_prompt || null,
+        image_system_prompt: playbook.image_system_prompt || null,
+        user_prompt_template: playbook.user_prompt_template || null
     };
 }
 
@@ -595,7 +671,7 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
     });
 }
 
-async function generateBackgroundImage(imagePrompt) {
+async function generateBackgroundImage(imagePrompt, imageSystemPrompt) {
     if (!GEMINI_API_KEY) {
         logger.warn('GEMINI_API_KEY not set, skipping image generation');
         return null;
@@ -603,22 +679,9 @@ async function generateBackgroundImage(imagePrompt) {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
-    const enhancedPrompt = [
-      `Generate a premium editorial photograph for an Instagram news post.`,
-      `Scene: ${imagePrompt}`,
-      `Style requirements:`,
-      `- Photorealistic, shot on Sony A7III or Canon R5`,
-      `- Cinematic color grading with dramatic lighting`,
-      `- Shallow depth of field, bokeh background`,
-      `- Dark moody atmosphere, deep shadows with accent lighting`,
-      `- If a person is the subject: close-up portrait, eye-level, professional lighting`,
-      `- If technology/product: dramatic product shot with rim lighting`,
-      `- If event/scene: wide angle establishing shot with leading lines`,
-      `- Aspect ratio 3:4 vertical (portrait orientation)`,
-      `- ABSOLUTELY NO text, watermarks, logos, UI elements, or overlays`,
-      `- Clean negative space in the lower third (text will be placed there)`,
-      `- High contrast, rich colors, magazine-quality editorial photography`
-    ].join('\n');
+    const enhancedPrompt = imageSystemPrompt
+        ? imageSystemPrompt.replace('{{image_prompt}}', imagePrompt)
+        : DEFAULT_IMAGE_SYSTEM_PROMPT(imagePrompt);
 
     const start = Date.now();
     try {
@@ -705,58 +768,23 @@ async function generateContent(article, generationConfig = null) {
         return finalizeGeneratedContent(article, {}, playbook, imageAssessment);
     }
 
-    const systemPrompt = [
-        'Ты главный редактор вирусного Instagram новостного канала с 2М подписчиков.',
-        'Твоя задача — писать ДЛИННЫЕ цепляющие заголовки которые ОСТАНАВЛИВАЮТ скроллинг.',
-        'Пишешь на русском языке. Весь headline КАПСОМ.',
-        '',
-        'ПРАВИЛА ЗАГОЛОВКОВ (headline_ru):',
-        '- Длина: 50-90 символов (8-15 слов). Заголовок должен ЗАПОЛНЯТЬ 3-4 строки на картинке.',
-        '- Весь текст КАПСОМ.',
-        '- Раскрой СУТЬ новости полностью в одном заголовке. Читатель должен понять ЧТО произошло.',
-        '- Используй конкретику: цифры, имена, суммы, последствия.',
-        '- Используй сильные глаголы: УНИЧТОЖИЛ, ОБОГНАЛ, УКРАЛ, ЗАПРЕТИЛ, ШОКИРОВАЛ, ОБВИНИЛ.',
-        '',
-        'ПРИМЕРЫ ИДЕАЛЬНЫХ ЗАГОЛОВКОВ:',
-        '- "OPENAI ПРИВЛЕК **$122 МИЛЛИАРДА** ДЛЯ УСКОРЕНИЯ НОВОЙ ФАЗЫ ИИ"',
-        '- "МОДЕЛИ ИИ **ЛГУТ И ВОРУЮТ** ЧТОБЫ ЗАЩИТИТЬ ДРУГИЕ МОДЕЛИ ОТ УДАЛЕНИЯ"',
-        '- "APPLE ТАЙНО ПЛАНИРУЕТ **ПОДКЛЮЧИТЬ SIRI** К НЕСКОЛЬКИМ ИИ АССИСТЕНТАМ"',
-        '- "УТЕЧКА ПЕРЕПИСКИ ПОКАЗАЛА КАК **ЭЛОН МАСК** ПРОСИЛ ЦУКЕРБЕРГА КУПИТЬ OPENAI"',
-        '- "GOOGLE НАШЁЛ СПОСОБ **СЖАТЬ ПАМЯТЬ ИИ** БЕЗ ПОТЕРИ ТОЧНОСТИ"',
-        '- "REDDIT ПРИДУМАЛ ПЛАН КАК **ОТДЕЛИТЬ БОТОВ** ОТ ЛЮДЕЙ НА САЙТЕ"',
-        '',
-        'ВЫДЕЛЕНИЕ КЛЮЧЕВЫХ СЛОВ (обязательно):',
-        '- Оберни 2-5 самых важных слов в **двойные звёздочки**',
-        '- Выделяй: суммы денег, шокирующие глаголы, имена, ключевой факт',
-        '- Выделенные слова будут отображаться АКЦЕНТНЫМ ЦВЕТОМ на картинке',
-        '',
-        'headline2_ru НЕ НУЖЕН. Оставь пустым.',
-        '',
-        'Caption: 3-5 предложений. Объясни почему это важно. Тон уверенный.',
-        'image_prompt: На английском. Фотореалистичная драматичная сцена связанная с новостью. БЕЗ текста.',
-        'Всегда отвечай чистым JSON без markdown.',
-        `Правила из playbook: ${JSON.stringify({
+    // Use playbook system_prompt if available, otherwise fall back to hardcoded default
+    const systemPrompt = playbook.system_prompt
+        ? playbook.system_prompt
+        : DEFAULT_SYSTEM_PROMPT + '\n' + `Правила из playbook: ${JSON.stringify({
             headlineRules: playbook.headlineRules || [],
             subheadlineRules: playbook.subheadlineRules || [],
             captionRules: playbook.captionRules || [],
             examples: playbook.examples || []
-        })}`
-    ].join('\n');
+        })}`;
 
-    const userPrompt = `Статья:
-Заголовок: ${article.raw_title}
-Краткое описание: ${article.raw_summary || ''}
-Текст: ${(article.raw_text || '').slice(0, 4000)}
-
-Ответь JSON:
-{
-  "headline_ru": "ДЛИННЫЙ ЗАГОЛОВОК 50-90 СИМВОЛОВ КАПСОМ С **ВЫДЕЛЕННЫМИ** КЛЮЧЕВЫМИ СЛОВАМИ КОТОРЫЙ ПОЛНОСТЬЮ РАСКРЫВАЕТ СУТЬ НОВОСТИ",
-  "headline2_ru": "",
-  "caption_ru": "3-5 предложений для Instagram поста без хэштегов",
-  "hashtags": "#тег1 #тег2 #тег3 #тег4 #тег5",
-  "image_prompt": "Photorealistic dramatic photo related to: ${article.raw_title}. Cinematic lighting, shallow depth of field, dark moody atmosphere. If about a person: close-up portrait. If about technology: dramatic product shot. NO text, NO watermarks, NO logos.",
-  "angle": "shock | useful | breakthrough | explain"
-}`;
+    // Use playbook user_prompt_template if available, otherwise fall back to hardcoded default
+    const userPrompt = playbook.user_prompt_template
+        ? playbook.user_prompt_template
+            .replace('{{raw_title}}', article.raw_title || '')
+            .replace('{{raw_summary}}', article.raw_summary || '')
+            .replace('{{raw_text}}', (article.raw_text || '').slice(0, 4000))
+        : DEFAULT_USER_PROMPT(article);
 
     const start = Date.now();
     let data;
@@ -973,7 +1001,8 @@ async function processArticle(article, generationConfig) {
     // ALWAYS generate background with Gemini (source image goes to circle overlay)
     let backgroundImage = null;
     if (content.image_prompt && GEMINI_API_KEY) {
-        backgroundImage = await generateBackgroundImage(content.image_prompt);
+        const imageSystemPrompt = activeConfig?.playbook?.image_system_prompt || null;
+        backgroundImage = await generateBackgroundImage(content.image_prompt, imageSystemPrompt);
     }
     if (!backgroundImage) {
         // Fallback: use source image as background if Gemini fails
