@@ -1067,7 +1067,7 @@ app.get('/health', async (req, res) => {
         checks.render = renderResp.ok;
     } catch { /* render unreachable */ }
     const ok = checks.brain && checks.render;
-    res.status(ok ? 200 : 503).json({
+    res.status(200).json({
         status: ok ? 'ok' : 'degraded',
         uptime: process.uptime(),
         brain_circuit: brainBreaker.getStatus(),
