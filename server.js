@@ -1021,6 +1021,12 @@ async function processArticle(article, generationConfig) {
     }
 
     const { coverImage } = await renderCover(article, prepared.content, templateMeta);
+    logger.info({
+        articleId: article.id,
+        headline_ru: prepared.content.headline_ru,
+        headline_bytes: Buffer.from(prepared.content.headline_ru || '').toString('hex').slice(0, 80),
+        caption_first50: (prepared.content.caption_ru || '').slice(0, 50)
+    }, 'DEBUG: content before saveToBrain');
     await saveToBrain(article.id, prepared.content, coverImage, templateMeta, prepared.renderInfo, activeConfig, article._generatedBackground);
 
     return {
