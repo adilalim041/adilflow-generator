@@ -750,6 +750,43 @@ app.get('/api/test-gemini', async (req, res) => {
     }
 });
 
+// Arbitrary image generation — for logo/design/brand exploration
+app.post('/api/gen-image', authMiddleware, async (req, res) => {
+    const { prompt } = req.body || {};
+    if (!prompt || typeof prompt !== 'string') {
+        return res.status(400).json({ error: 'prompt required (string)' });
+    }
+    if (!GEMINI_API_KEY) return res.status(503).json({ error: 'GEMINI_API_KEY not set' });
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
+            })
+        });
+        if (!response.ok) {
+            const errText = await response.text();
+            return res.status(502).json({ error: `Gemini ${response.status}`, body: errText.slice(0, 500) });
+        }
+        const data = await response.json();
+        const parts = data.candidates?.[0]?.content?.parts || [];
+        for (const part of parts) {
+            if (part.inlineData) {
+                const imageBuffer = Buffer.from(part.inlineData.data, 'base64');
+                const cloudUrl = await uploadBufferToCloudinary(imageBuffer);
+                return res.json({ success: true, url: cloudUrl, model: GEMINI_MODEL });
+            }
+        }
+        res.json({ success: false, error: 'Gemini returned no image', textParts: parts.filter(p => p.text).map(p => p.text) });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 async function generateContent(article, generationConfig = null) {
     const playbook = normalizePlaybook(generationConfig?.playbook);
     const imageAssessment = assessSourceImage(article);
