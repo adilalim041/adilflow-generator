@@ -82,7 +82,6 @@ const GENERATOR_PLAYBOOK_PATH = process.env.GENERATOR_PLAYBOOK_PATH || path.join
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
 const templateMetaCache = new Map();
-const generationConfigCache = new Map();
 let playbookCache = null;
 
 // ═══════════════════════════════════════
@@ -585,11 +584,6 @@ async function getArticlesFromBrain(niche, count) {
 }
 
 async function fetchGenerationConfig(niche) {
-    const cacheKey = `${GENERATOR_PLATFORM}:${niche}:${GENERATOR_CHANNEL_KEY || 'default'}:${GENERATOR_FORMAT}`;
-    if (generationConfigCache.has(cacheKey)) {
-        return generationConfigCache.get(cacheKey);
-    }
-
     try {
         const query = new URLSearchParams({
             niche,
@@ -600,26 +594,22 @@ async function fetchGenerationConfig(niche) {
         const data = await brainFetch(`/api/config/resolve?${query.toString()}`, { method: 'GET' });
         const config = data?.config || {};
         const templateBinding = chooseTemplateBinding(config.template_bindings, GENERATOR_FORMAT);
-        const resolved = {
+        return {
             source: templateBinding || config.playbook || config.channel_profile ? 'brain' : 'fallback',
             channelProfile: config.channel_profile || null,
             playbook: normalizePlaybook(config.playbook),
             templateBinding,
             templateId: templateBinding?.template_id || INSTAGRAM_TEMPLATE_ID
         };
-        generationConfigCache.set(cacheKey, resolved);
-        return resolved;
     } catch (error) {
         logger.warn({ niche, error: error.message }, 'Config fallback to local defaults');
-        const resolved = {
+        return {
             source: 'fallback',
             channelProfile: null,
             playbook: loadGeneratorPlaybook(),
             templateBinding: null,
             templateId: INSTAGRAM_TEMPLATE_ID
         };
-        generationConfigCache.set(cacheKey, resolved);
-        return resolved;
     }
 }
 
@@ -1021,12 +1011,6 @@ async function processArticle(article, generationConfig) {
     }
 
     const { coverImage } = await renderCover(article, prepared.content, templateMeta);
-    logger.info({
-        articleId: article.id,
-        headline_ru: prepared.content.headline_ru,
-        headline_bytes: Buffer.from(prepared.content.headline_ru || '').toString('hex').slice(0, 80),
-        caption_first50: (prepared.content.caption_ru || '').slice(0, 50)
-    }, 'DEBUG: content before saveToBrain');
     await saveToBrain(article.id, prepared.content, coverImage, templateMeta, prepared.renderInfo, activeConfig, article._generatedBackground);
 
     return {
