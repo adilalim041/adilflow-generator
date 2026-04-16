@@ -215,12 +215,15 @@ class CircuitBreaker {
             this.onSuccess();
             return result;
         } catch (error) {
-            this.onFailure();
+            this.onFailure(error);
             throw error;
         }
     }
     onSuccess() { this.failures = 0; this.state = 'CLOSED'; }
-    onFailure() {
+    onFailure(error) {
+        // AbortError = 4xx client error (auth failure, bad request) — not an outage.
+        // Do NOT count toward the failure threshold; these are caller bugs, not provider down.
+        if (error && error.name === 'AbortError') return;
         this.failures++;
         if (this.failures >= this.threshold) {
             this.state = 'OPEN';
@@ -249,6 +252,9 @@ async function withRetry(fn, { retries = 2, baseDelay = 1000, maxDelay = 8000 } 
 }
 
 const brainBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'brain' });
+const openaiBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'openai' });
+const geminiBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'gemini' });
+const cloudinaryBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'cloudinary' });
 
 function authMiddleware(req, res, next) {
     const raw = req.headers.authorization || '';
@@ -708,8 +714,15 @@ async function generateBackgroundImage(imagePrompt, imageSystemPrompt) {
         : DEFAULT_IMAGE_SYSTEM_PROMPT(imagePrompt);
 
     const start = Date.now();
+
+    // CB_OPEN fast-fail: skip queue/retry entirely, use fallback
+    if (geminiBreaker.state === 'OPEN' && Date.now() < geminiBreaker.nextAttempt) {
+        logger.warn({ provider: 'gemini', action: 'image_gen', outcome: 'cb_open_fallback', articleId: article?.id }, 'Gemini CB OPEN — skipping image generation');
+        return null;
+    }
+
     try {
-        const data = await geminiQueue.add(() => pRetry(async () => {
+        const data = await geminiQueue.add(() => geminiBreaker.exec(() => pRetry(async () => {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 30000);
             try {
@@ -739,7 +752,7 @@ async function generateBackgroundImage(imagePrompt, imageSystemPrompt) {
             onFailedAttempt: (err) => {
                 logger.warn({ provider: 'gemini', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message, prompt: imagePrompt.slice(0, 50) }, 'Gemini retry');
             }
-        }));
+        })));
 
         const parts = data.candidates?.[0]?.content?.parts || [];
         for (const part of parts) {
@@ -848,9 +861,18 @@ async function generateContent(article, generationConfig = null) {
         : DEFAULT_USER_PROMPT(article);
 
     const start = Date.now();
+
+    // CB_OPEN fast-fail: immediately use raw_title/raw_summary fallback
+    if (openaiBreaker.state === 'OPEN' && Date.now() < openaiBreaker.nextAttempt) {
+        const headline = (article.raw_title || 'ВАЖНАЯ НОВОСТЬ').toUpperCase();
+        const caption = (article.raw_summary || article.raw_text || '').replace(/\s+/g, ' ').trim().slice(0, 420);
+        logger.warn({ provider: 'openai', action: 'headline_gen', outcome: 'cb_open_fallback', articleId: article.id }, 'OpenAI CB OPEN — using raw_title/raw_summary fallback');
+        return finalizeGeneratedContent(article, { headline_ru: headline, caption_ru: caption }, playbook, imageAssessment);
+    }
+
     let data;
     try {
-        data = await openaiQueue.add(() => pRetry(async () => {
+        data = await openaiQueue.add(() => openaiBreaker.exec(() => pRetry(async () => {
             const response = await fetch('https://api.openai.com/v1/chat/completions', {
                 method: 'POST',
                 headers: {
@@ -882,7 +904,7 @@ async function generateContent(article, generationConfig = null) {
             onFailedAttempt: (err) => {
                 logger.warn({ provider: 'openai', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message, articleId: article.id }, 'OpenAI retry');
             }
-        }));
+        })));
         logger.info({ provider: 'openai', latencyMs: Date.now() - start, articleId: article.id, model: OPENAI_MODEL }, 'OpenAI content generated');
     } catch (error) {
         logger.warn({ provider: 'openai', latencyMs: Date.now() - start, error: error.message, articleId: article.id }, 'OpenAI failed, using fallback');
@@ -967,7 +989,11 @@ async function prepareTemplateRender(article, content, templateMeta) {
 
 async function uploadToCloudinary(imageBuffer, mimeType = 'image/png') {
     const start = Date.now();
-    const result = await cloudinaryQueue.add(() => pRetry(async () => {
+    if (cloudinaryBreaker.state === 'OPEN' && Date.now() < cloudinaryBreaker.nextAttempt) {
+        logger.warn({ provider: 'cloudinary', action: 'cover_upload', outcome: 'cb_open' }, 'Cloudinary CB OPEN — upload unavailable');
+        throw Object.assign(new Error('Cloudinary circuit breaker OPEN — cover upload unavailable'), { code: 'CB_OPEN' });
+    }
+    const result = await cloudinaryQueue.add(() => cloudinaryBreaker.exec(() => pRetry(async () => {
         const formData = new FormData();
         formData.append('file', new Blob([imageBuffer], { type: mimeType }));
         formData.append('folder', 'adilflow_instagram');
@@ -1005,14 +1031,18 @@ async function uploadToCloudinary(imageBuffer, mimeType = 'image/png') {
         onFailedAttempt: (err) => {
             logger.warn({ provider: 'cloudinary', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message }, 'Cloudinary retry');
         }
-    }));
+    })));
     logger.info({ provider: 'cloudinary', latencyMs: Date.now() - start }, 'Cloudinary upload ok');
     return result;
 }
 
 async function uploadBufferToCloudinary(buffer) {
     const start = Date.now();
-    const url = await cloudinaryQueue.add(() => pRetry(async () => {
+    if (cloudinaryBreaker.state === 'OPEN' && Date.now() < cloudinaryBreaker.nextAttempt) {
+        logger.warn({ provider: 'cloudinary', action: 'buffer_upload', outcome: 'cb_open' }, 'Cloudinary CB OPEN — buffer upload unavailable');
+        throw Object.assign(new Error('Cloudinary circuit breaker OPEN — buffer upload unavailable'), { code: 'CB_OPEN' });
+    }
+    const url = await cloudinaryQueue.add(() => cloudinaryBreaker.exec(() => pRetry(async () => {
         const timestamp = Math.floor(Date.now() / 1000);
         const folder = 'adilflow_instagram';
         const formData = new FormData();
@@ -1049,7 +1079,7 @@ async function uploadBufferToCloudinary(buffer) {
         onFailedAttempt: (err) => {
             logger.warn({ provider: 'cloudinary', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message }, 'Cloudinary buffer retry');
         }
-    }));
+    })));
     logger.info({ provider: 'cloudinary', latencyMs: Date.now() - start }, 'Cloudinary buffer upload ok');
     return url;
 }
@@ -1132,6 +1162,11 @@ app.get('/health', async (req, res) => {
         status: ok ? 'ok' : 'degraded',
         uptime: process.uptime(),
         brain_circuit: brainBreaker.getStatus(),
+        breakers: {
+            openai: openaiBreaker.getStatus(),
+            gemini: geminiBreaker.getStatus(),
+            cloudinary: cloudinaryBreaker.getStatus()
+        },
         dependencies: checks
     });
 });
