@@ -48,6 +48,19 @@ const pinoHttp = require('pino-http');
 const logger = pino({ name: 'adilflow-generator' });
 
 // ═══════════════════════════════════════
+// CAPTION UNIQUENESS HELPER
+// ═══════════════════════════════════════
+const { checkCaptionUniqueness, nextAngle } = require('./lib/captionUniqueness');
+
+// In-memory stats for /health
+const captionUniquenessStats = {
+    checked: 0,
+    duplicates: 0,
+    regens: 0,
+    accepted_anyway: 0
+};
+
+// ═══════════════════════════════════════
 // ESM DEPS: p-retry (retry with backoff) + p-queue (concurrency control)
 // ═══════════════════════════════════════
 let pRetry, AbortError;
@@ -834,7 +847,17 @@ app.post('/api/gen-image', authMiddleware, async (req, res) => {
     }
 });
 
-async function generateContent(article, generationConfig = null) {
+/**
+ * Generate headline/caption/hashtags/image_prompt for one article.
+ *
+ * @param {object} article
+ * @param {object|null} generationConfig
+ * @param {object} [opts]
+ * @param {string} [opts.forceAngle] - if set, appended to user prompt to override angle
+ * @param {number} [opts.temperature] - OpenAI temperature override (default: 0.5)
+ */
+async function generateContent(article, generationConfig = null, opts = {}) {
+    const { forceAngle, temperature: tempOverride } = opts;
     const playbook = normalizePlaybook(generationConfig?.playbook);
     const imageAssessment = assessSourceImage(article);
 
@@ -853,12 +876,19 @@ async function generateContent(article, generationConfig = null) {
         })}`;
 
     // Use playbook user_prompt_template if available, otherwise fall back to hardcoded default
-    const userPrompt = playbook.user_prompt_template
+    let userPrompt = playbook.user_prompt_template
         ? playbook.user_prompt_template
             .replace('{{raw_title}}', article.raw_title || '')
             .replace('{{raw_summary}}', article.raw_summary || '')
             .replace('{{raw_text}}', (article.raw_text || '').slice(0, 4000))
         : DEFAULT_USER_PROMPT(article);
+
+    // If forceAngle is requested (regen attempt), append instruction and expect it in output
+    if (forceAngle) {
+        userPrompt += `\n\nВАЖНО: Используй angle: ${forceAngle}. В JSON поле "angle" должно быть "${forceAngle}".`;
+    }
+
+    const callTemperature = typeof tempOverride === 'number' ? tempOverride : 0.5;
 
     const start = Date.now();
 
@@ -885,7 +915,7 @@ async function generateContent(article, generationConfig = null) {
                         { role: 'system', content: systemPrompt },
                         { role: 'user', content: userPrompt }
                     ],
-                    temperature: 0.5,
+                    temperature: callTemperature,
                     max_tokens: 700,
                     response_format: { type: 'json_object' }
                 })
@@ -1087,7 +1117,47 @@ async function uploadBufferToCloudinary(buffer) {
 async function processArticle(article, generationConfig) {
     const activeConfig = generationConfig || await fetchGenerationConfig(article.niche || 'health_medicine');
     const templateId = activeConfig?.templateId || INSTAGRAM_TEMPLATE_ID;
-    const content = await generateContent(article, activeConfig);
+
+    // ── Caption uniqueness check with one regen attempt ──────────────────────
+    // Step 1: generate content with default angle
+    let generated = await generateContent(article, activeConfig);
+
+    // Step 2: check uniqueness against recent published captions
+    captionUniquenessStats.checked++;
+    const check1 = await checkCaptionUniqueness(generated.caption_ru, article.id);
+    if (!check1.unique && !check1.check_failed) {
+        captionUniquenessStats.duplicates++;
+        logger.warn({
+            articleId: article.id,
+            similarity: check1.similarity,
+            matched_article_id: check1.matched_article_id,
+            matched_niche: check1.matched_niche,
+            action: 'caption_duplicate_detected',
+            outcome: 'regen_attempt'
+        }, 'Caption too similar to recent published — regenerating with new angle');
+
+        // Step 3: regen with rotated angle + higher temperature for diversity
+        const newAngle = nextAngle(generated.angle || 'shock');
+        captionUniquenessStats.regens++;
+        generated = await generateContent(article, activeConfig, { forceAngle: newAngle, temperature: 0.85 });
+
+        // Step 4: check again — if still duplicate, accept anyway to avoid stuck pipeline
+        captionUniquenessStats.checked++;
+        const check2 = await checkCaptionUniqueness(generated.caption_ru, article.id);
+        if (!check2.unique && !check2.check_failed) {
+            captionUniquenessStats.accepted_anyway++;
+            logger.warn({
+                articleId: article.id,
+                similarity: check2.similarity,
+                matched_article_id: check2.matched_article_id,
+                action: 'caption_duplicate_persists',
+                outcome: 'accepted_anyway'
+            }, 'Caption still too similar after regen — accepting to avoid stuck pipeline');
+        }
+    }
+
+    // Use the (possibly regenerated) content going forward
+    const content = generated;
 
     // ALWAYS generate background with Gemini (source image goes to circle overlay)
     let backgroundImage = null;
@@ -1167,6 +1237,7 @@ app.get('/health', async (req, res) => {
             gemini: geminiBreaker.getStatus(),
             cloudinary: cloudinaryBreaker.getStatus()
         },
+        caption_uniqueness: captionUniquenessStats,
         dependencies: checks
     });
 });
