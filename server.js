@@ -5,6 +5,27 @@
 
 require('dotenv').config();
 
+// ═══════════════════════════════════════
+// FAIL-CLOSED STARTUP GUARD
+// Must run before Sentry or any other init — uses minimal pino instance.
+// ═══════════════════════════════════════
+const _startupLogger = require('pino')({ name: 'adilflow-generator-startup' });
+
+const REQUIRED_ENV = [
+    'GENERATOR_API_KEY',
+    'BRAIN_API_KEY',
+    'OPENAI_API_KEY',
+    'GEMINI_API_KEY',
+    'CLOUDINARY_API_KEY',
+    'CLOUDINARY_API_SECRET',
+];
+
+const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missingEnv.length > 0) {
+    _startupLogger.fatal({ missing: missingEnv }, 'Missing required environment variables — refusing to start');
+    process.exit(1);
+}
+
 const Sentry = require('@sentry/node');
 if (process.env.SENTRY_DSN) {
     Sentry.init({
@@ -17,6 +38,8 @@ if (process.env.SENTRY_DSN) {
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const helmet = require('helmet');
+const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const { z } = require('zod');
 const pino = require('pino');
@@ -59,7 +82,19 @@ const GenerateSchema = z.object({
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(express.json({ limit: '10mb' }));
+app.use(helmet());
+
+const _allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+const _corsOrigin = _allowedOrigins.length > 0
+    ? _allowedOrigins
+    : /^http:\/\/localhost(:\d+)?$/;
+
+app.use(cors({ origin: _corsOrigin, credentials: true }));
+
+app.use(express.json({ limit: '1mb' }));
 app.use(pinoHttp({ logger }));
 app.use('/api/', rateLimit({ windowMs: 60_000, max: 60, message: { error: 'Too many requests' } }));
 app.use('/api/generate', rateLimit({ windowMs: 60_000, max: 20 }));
@@ -216,11 +251,10 @@ async function withRetry(fn, { retries = 2, baseDelay = 1000, maxDelay = 8000 } 
 const brainBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'brain' });
 
 function authMiddleware(req, res, next) {
-    if (!GENERATOR_API_KEY) return next();
     const raw = req.headers.authorization || '';
     const key = raw.replace(/^Bearer\s+/i, '').trim();
     if (key !== GENERATOR_API_KEY) {
-        logger.warn({ got: key.slice(0, 8) + '...', expect: GENERATOR_API_KEY.slice(0, 8) + '...' }, 'Auth mismatch');
+        logger.warn({ ip: req.ip }, 'Auth mismatch');
         return res.status(401).json({ error: 'Unauthorized' });
     }
     next();
