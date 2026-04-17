@@ -100,6 +100,11 @@ const GenerateSchema = z.object({
     count: z.number().int().min(1).max(20).default(1)
 }).passthrough();
 
+const GenerateOneSchema = z.object({
+    article_id: z.union([z.number().int().positive(), z.string().regex(/^\d+$/)])
+        .transform(v => typeof v === 'string' ? parseInt(v, 10) : v)
+}).passthrough();
+
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
@@ -1383,6 +1388,43 @@ app.post('/api/generate', authMiddleware, validate(GenerateSchema), async (req, 
     } catch (error) {
         logger.error({ error: error.message }, 'Generate endpoint error');
         res.status(500).json({ error: error.message });
+    }
+});
+
+// Test-run generator on a single article by ID (Dashboard-triggered).
+// Bypasses the ready-queue pull; runs processArticle directly.
+app.post('/api/generate-one', authMiddleware, validate(GenerateOneSchema), async (req, res) => {
+    try {
+        const { article_id } = req.body;
+
+        const articleDetail = await brainFetch(`/api/articles/${article_id}`, { method: 'GET' });
+        const article = articleDetail?.article || articleDetail;
+        if (!article || !article.id) {
+            return res.status(404).json({ error: 'Article not found' });
+        }
+
+        const ELIGIBLE = new Set(['classified', 'ready', 'publish_failed', 'processing']);
+        if (!ELIGIBLE.has(article.status)) {
+            return res.status(409).json({
+                error: 'article_not_eligible',
+                status: article.status,
+                expected: Array.from(ELIGIBLE)
+            });
+        }
+
+        const generationConfig = await fetchGenerationConfig(article.niche || 'health_medicine');
+
+        try {
+            const result = await processArticle(article, generationConfig);
+            res.json({ success: true, result });
+        } catch (err) {
+            logger.error({ articleId: article_id, err: err.message }, 'generate-one failed');
+            try { await markArticleFailed(article_id, err.message); } catch {}
+            res.status(500).json({ success: false, error: err.message });
+        }
+    } catch (error) {
+        logger.error({ error: error.message }, 'generate-one endpoint error');
+        res.status(error.status || 500).json({ error: error.message });
     }
 });
 
