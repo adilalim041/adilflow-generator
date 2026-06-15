@@ -1354,6 +1354,26 @@ app.get('/health', async (req, res) => {
     });
 });
 
+app.get('/api/config-check', authMiddleware, (req, res) => {
+    res.json({
+        success: true,
+        configured: {
+            brain_url: !!BRAIN_URL,
+            brain_api_key: !!BRAIN_API_KEY,
+            render_service_url: !!RENDER_SERVICE_URL,
+            render_api_key: !!RENDER_API_KEY,
+            openai_api_key: !!OPENAI_API_KEY,
+            gemini_api_key: !!GEMINI_API_KEY,
+            cloudinary_cloud_name: !!CLOUDINARY_CLOUD_NAME,
+            cloudinary_api_key: !!CLOUDINARY_API_KEY,
+            cloudinary_api_secret: !!CLOUDINARY_API_SECRET,
+            template_id: !!INSTAGRAM_TEMPLATE_ID
+        },
+        template_id: INSTAGRAM_TEMPLATE_ID,
+        render_service: RENDER_SERVICE_URL
+    });
+});
+
 
 app.post('/api/generate', authMiddleware, validate(GenerateSchema), async (req, res) => {
     try {
