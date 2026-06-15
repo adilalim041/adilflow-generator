@@ -18,6 +18,7 @@ const REQUIRED_ENV = [
     'GEMINI_API_KEY',
     'CLOUDINARY_API_KEY',
     'CLOUDINARY_API_SECRET',
+    'RENDER_API_KEY',
 ];
 
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
@@ -127,6 +128,7 @@ app.use('/api/generate', rateLimit({ windowMs: 60_000, max: 20 }));
 const BRAIN_URL = process.env.BRAIN_URL || 'https://adilflow-brain-production.up.railway.app';
 const BRAIN_API_KEY = process.env.BRAIN_API_KEY || '';
 const RENDER_SERVICE_URL = process.env.RENDER_SERVICE_URL || 'http://localhost:3000';
+const RENDER_API_KEY = process.env.RENDER_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const GENERATOR_API_KEY = process.env.GENERATOR_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
@@ -542,7 +544,11 @@ function buildTemplateValueMap(article, content) {
 }
 
 async function renderFetch(path, options = {}) {
-    return fetch(`${RENDER_SERVICE_URL}${path}`, options);
+    const headers = {
+        ...(options.headers || {}),
+        Authorization: `Bearer ${RENDER_API_KEY}`
+    };
+    return fetch(`${RENDER_SERVICE_URL}${path}`, { ...options, headers });
 }
 
 async function fetchTemplateMeta(templateId) {
