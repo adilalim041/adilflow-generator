@@ -402,6 +402,101 @@ function fallbackCaption(article) {
     return source.replace(/\s+/g, ' ').trim().slice(0, 420);
 }
 
+const RU_MONTH_NAMES = [
+    'ЯНВАРЯ', 'ФЕВРАЛЯ', 'МАРТА', 'АПРЕЛЯ', 'МАЯ', 'ИЮНЯ',
+    'ИЮЛЯ', 'АВГУСТА', 'СЕНТЯБРЯ', 'ОКТЯБРЯ', 'НОЯБРЯ', 'ДЕКАБРЯ'
+];
+
+const EN_TO_RU_MONTH = {
+    january: 'ЯНВАРЯ',
+    february: 'ФЕВРАЛЯ',
+    march: 'МАРТА',
+    april: 'АПРЕЛЯ',
+    may: 'МАЯ',
+    june: 'ИЮНЯ',
+    july: 'ИЮЛЯ',
+    august: 'АВГУСТА',
+    september: 'СЕНТЯБРЯ',
+    october: 'ОКТЯБРЯ',
+    november: 'НОЯБРЯ',
+    december: 'ДЕКАБРЯ'
+};
+
+function isoDateOnly(value) {
+    const raw = String(value || '').trim();
+    const direct = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (direct) return direct[1];
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toISOString().slice(0, 10);
+}
+
+function ruDateKeyFromIso(value) {
+    const iso = isoDateOnly(value);
+    const parts = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!parts) return '';
+    const monthName = RU_MONTH_NAMES[Number(parts[2]) - 1];
+    return monthName ? `${Number(parts[3])} ${monthName}` : '';
+}
+
+function articleDateContext(article) {
+    const published = isoDateOnly(article?.published_at);
+    const parsed = isoDateOnly(article?.parsed_at);
+    const current = new Date().toISOString().slice(0, 10);
+    return {
+        published_at: published,
+        parsed_at: parsed,
+        current_date: current,
+        validHeadlineDateKeys: [
+            ruDateKeyFromIso(published),
+            ruDateKeyFromIso(parsed),
+            ruDateKeyFromIso(current)
+        ].filter(Boolean)
+    };
+}
+
+function normalizeMentionedDateKey(value) {
+    const raw = String(value || '').toUpperCase();
+    const ru = raw.match(/\b(\d{1,2})\s+(ЯНВАРЯ|ФЕВРАЛЯ|МАРТА|АПРЕЛЯ|МАЯ|ИЮНЯ|ИЮЛЯ|АВГУСТА|СЕНТЯБРЯ|ОКТЯБРЯ|НОЯБРЯ|ДЕКАБРЯ)\b/);
+    if (ru) return `${Number(ru[1])} ${ru[2]}`;
+    const en = raw.match(/\b(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{1,2})\b/);
+    if (en) return `${Number(en[2])} ${EN_TO_RU_MONTH[en[1].toLowerCase()]}`;
+    return '';
+}
+
+function stripStaleLeadingDate(article, headline) {
+    const value = String(headline || '').trim();
+    const prefix = value.match(/^(\d{1,2})\s+(ЯНВАРЯ|ФЕВРАЛЯ|МАРТА|АПРЕЛЯ|МАЯ|ИЮНЯ|ИЮЛЯ|АВГУСТА|СЕНТЯБРЯ|ОКТЯБРЯ|НОЯБРЯ|ДЕКАБРЯ)\s+/i);
+    if (!prefix) return value;
+
+    const prefixKey = `${Number(prefix[1])} ${prefix[2].toUpperCase()}`;
+    const context = articleDateContext(article);
+    const sourceMentionsSameDate = [
+        article?.raw_title,
+        article?.raw_summary
+    ].some((part) => normalizeMentionedDateKey(part) === prefixKey);
+
+    if (context.validHeadlineDateKeys.includes(prefixKey) || sourceMentionsSameDate) {
+        return value;
+    }
+
+    const stripped = value.slice(prefix[0].length).replace(/^[\s:—-]+/, '').trim();
+    return stripped || value;
+}
+
+function appendDateFreshnessGuard(userPrompt, article) {
+    const context = articleDateContext(article);
+    return `${userPrompt}
+
+DATE FRESHNESS RULES:
+- Current date: ${context.current_date}
+- Source published_at: ${context.published_at || 'unknown'}
+- Parsed at: ${context.parsed_at || 'unknown'}
+- Do not copy dates from examples.
+- Do not start headline_ru with a date unless that exact date is a central fact in the article or matches source published_at/parsed_at/current date.
+- If the article is not specifically about a calendar date, write headline_ru without a date prefix.`;
+}
+
 function loadGeneratorPlaybook() {
     if (playbookCache) return playbookCache;
 
@@ -562,6 +657,7 @@ function normalizeImagePromptForDiversity(article, prompt) {
 function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     const merged = { ...buildFallbackContent(article), ...(content || {}) };
     merged.headline_ru = (merged.headline_ru || '').toUpperCase() || 'ВАЖНАЯ НОВОСТЬ';
+    merged.headline_ru = stripStaleLeadingDate(article, merged.headline_ru).toUpperCase();
     merged.headline2_ru = merged.headline2_ru || '';
     merged.caption_ru = (merged.caption_ru || fallbackCaption(article) || article.raw_title || '').trim();
     merged.hashtags = merged.hashtags || '#новости #инстаграм #медиа #обзор';
@@ -1156,6 +1252,7 @@ async function generateContent(article, generationConfig = null, opts = {}) {
     // Article data is XML-escaped and wrapped to prevent prompt injection from RSS content.
     let userPrompt;
     if (playbook.user_prompt_template) {
+        const dateContext = articleDateContext(article);
         // Replace allowed template variables with XML-escaped article data
         userPrompt = playbook.user_prompt_template
             .replace(/\{\{raw_title\}\}/g,   escapeXml(article.raw_title))
@@ -1163,10 +1260,14 @@ async function generateContent(article, generationConfig = null, opts = {}) {
             .replace(/\{\{raw_text\}\}/g,    escapeXml((article.raw_text ?? '').slice(0, 4000)))
             .replace(/\{\{title\}\}/g,       escapeXml(article.raw_title))
             .replace(/\{\{summary\}\}/g,     escapeXml(article.raw_summary))
-            .replace(/\{\{text\}\}/g,        escapeXml((article.raw_text ?? '').slice(0, 4000)));
+            .replace(/\{\{text\}\}/g,        escapeXml((article.raw_text ?? '').slice(0, 4000)))
+            .replace(/\{\{published_at\}\}/g, escapeXml(dateContext.published_at))
+            .replace(/\{\{parsed_at\}\}/g, escapeXml(dateContext.parsed_at))
+            .replace(/\{\{current_date\}\}/g, escapeXml(dateContext.current_date));
     } else {
         userPrompt = DEFAULT_USER_PROMPT(article);
     }
+    userPrompt = appendDateFreshnessGuard(userPrompt, article);
 
     // If forceAngle is requested (regen attempt), append instruction and expect it in output
     if (forceAngle) {
@@ -1291,6 +1392,50 @@ async function renderCover(article, content, templateMeta) {
     const imageBuffer = Buffer.from(await response.arrayBuffer());
     const coverImage = await uploadToCloudinary(imageBuffer, 'image/png');
     return { coverImage, renderInfo };
+}
+
+async function renderCoverPreviewDataUrl(article, content, templateMeta) {
+    const renderInfo = buildRenderPayload(article, content, templateMeta);
+    if (renderInfo.missing.includes('imageUrl')) {
+        return { previewDataUrl: null, renderInfo, error: 'missing_imageUrl' };
+    }
+
+    const response = await renderFetch(templateMeta?.renderUrl || `/api/render/${templateMeta?.id || INSTAGRAM_TEMPLATE_ID}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(renderInfo.payload)
+    });
+
+    if (!response.ok) {
+        const text = await response.text();
+        return { previewDataUrl: null, renderInfo, error: `Render service failed: ${response.status} ${text}`.trim() };
+    }
+
+    const imageBuffer = Buffer.from(await response.arrayBuffer());
+    return {
+        previewDataUrl: `data:image/png;base64,${imageBuffer.toString('base64')}`,
+        renderInfo,
+        error: null
+    };
+}
+
+function contentFromExistingArticle(article, playbook, imageAssessment) {
+    if (!article?.headline && !article?.body && !article?.image_prompt) {
+        return null;
+    }
+
+    const scores = article.scores_detail || {};
+    return finalizeGeneratedContent(article, {
+        headline_ru: article.headline || '',
+        headline2_ru: article.headline2 || '',
+        caption_ru: article.body || article.telegram_caption || '',
+        hashtags: article.conclusion || '',
+        image_prompt: article.image_prompt || '',
+        angle: scores.generator_angle || 'news',
+        image_strategy: scores.image_strategy || imageAssessment.recommendation,
+        image_assessment: scores.image_assessment || imageAssessment,
+        use_original_image: scores.used_original_image ?? imageAssessment.hasImage
+    }, playbook, imageAssessment);
 }
 
 function cloneContent(content) {
@@ -1675,39 +1820,82 @@ app.post('/api/generate-one', authMiddleware, validate(GenerateOneSchema), async
 
 app.post('/api/preview', authMiddleware, async (req, res) => {
     try {
-        const { niche = 'health_medicine', count = 2 } = req.body || {};
-        const articles = await getArticlesFromBrain(niche, count);
-        const generationConfig = await fetchGenerationConfig(niche);
+        const {
+            niche = 'health_medicine',
+            count = 2,
+            article_id,
+            template_ids,
+            render_preview = false,
+            use_existing_content = true
+        } = req.body || {};
+        let articles;
+        if (article_id) {
+            const articleDetail = await brainFetch(`/api/articles/${article_id}`, { method: 'GET' });
+            const article = articleDetail?.article || articleDetail;
+            articles = article?.id ? [article] : [];
+        } else {
+            articles = await getArticlesFromBrain(niche, count);
+        }
+        if (!articles.length) {
+            return res.status(404).json({ success: false, error: 'No preview articles found' });
+        }
+
+        const configNiche = article_id && articles[0]?.niche ? articles[0].niche : niche;
+        const generationConfig = await fetchGenerationConfig(configNiche);
+        const requestedTemplateIds = Array.isArray(template_ids)
+            ? template_ids.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 8)
+            : [];
         const previews = [];
 
         for (const article of articles) {
-            const generated = await generateContent(article, generationConfig);
-            const templateMeta = await fetchTemplateMeta(generationConfig?.templateId || INSTAGRAM_TEMPLATE_ID);
-            const prepared = await prepareTemplateRender(article, generated, templateMeta);
-            previews.push({
-                id: article.id,
-                title: article.raw_title,
-                source_image: getSourceImage(article),
-                config_source: generationConfig?.source || 'fallback',
-                channel_profile_key: generationConfig?.channelProfile?.key || null,
-                playbook_key: generationConfig?.playbook?.key || null,
-                template_id: templateMeta?.id || generationConfig?.templateId || INSTAGRAM_TEMPLATE_ID,
-                template_required_variables: prepared.renderInfo.requiredVariables,
-                template_missing_variables: prepared.renderInfo.missing,
-                template_fit_ok: prepared.renderInfo.fit?.ok !== false,
-                template_fit_issues: prepared.renderInfo.fit?.issues || [],
-                template_text_adjustments: prepared.renderInfo.adjustments || [],
-                image_strategy: prepared.content.image_strategy || 'use_original',
-                image_assessment: prepared.content.image_assessment || null,
-                image_prompt: prepared.content.image_prompt || '',
-                render_payload: prepared.renderInfo.resolvedVariables,
-                resolved_config: {
-                    source: generationConfig?.source || 'fallback',
-                    template_binding: generationConfig?.templateBinding || null
-                },
-                generated,
-                generated_adjusted: prepared.content
-            });
+            const articleForPreview = { ...article };
+            if (article.generated_image) {
+                articleForPreview._generatedBackground = article.generated_image;
+            }
+
+            const imageAssessment = assessSourceImage(articleForPreview);
+            const existingContent = use_existing_content
+                ? contentFromExistingArticle(articleForPreview, generationConfig?.playbook, imageAssessment)
+                : null;
+            const generated = existingContent || await generateContent(articleForPreview, generationConfig);
+            const templateIds = requestedTemplateIds.length
+                ? requestedTemplateIds
+                : [generationConfig?.templateId || INSTAGRAM_TEMPLATE_ID];
+
+            for (const templateId of templateIds) {
+                const templateMeta = await fetchTemplateMeta(templateId);
+                const prepared = await prepareTemplateRender(articleForPreview, generated, templateMeta);
+                const rendered = render_preview
+                    ? await renderCoverPreviewDataUrl(articleForPreview, prepared.content, templateMeta)
+                    : { previewDataUrl: null, error: null };
+
+                previews.push({
+                    id: article.id,
+                    title: article.raw_title,
+                    source_image: getSourceImage(articleForPreview),
+                    config_source: generationConfig?.source || 'fallback',
+                    channel_profile_key: generationConfig?.channelProfile?.key || null,
+                    playbook_key: generationConfig?.playbook?.key || null,
+                    template_id: templateMeta?.id || templateId,
+                    template_required_variables: prepared.renderInfo.requiredVariables,
+                    template_missing_variables: prepared.renderInfo.missing,
+                    template_fit_ok: prepared.renderInfo.fit?.ok !== false,
+                    template_fit_issues: prepared.renderInfo.fit?.issues || [],
+                    template_text_adjustments: prepared.renderInfo.adjustments || [],
+                    image_strategy: prepared.content.image_strategy || 'use_original',
+                    image_assessment: prepared.content.image_assessment || null,
+                    image_prompt: prepared.content.image_prompt || '',
+                    render_payload: prepared.renderInfo.resolvedVariables,
+                    preview_image: rendered.previewDataUrl,
+                    preview_error: rendered.error,
+                    resolved_config: {
+                        source: generationConfig?.source || 'fallback',
+                        template_binding: generationConfig?.templateBinding || null
+                    },
+                    generated,
+                    generated_adjusted: prepared.content
+                });
+            }
         }
 
         res.json({ success: true, previews });
