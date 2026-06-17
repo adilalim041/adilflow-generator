@@ -20,7 +20,7 @@
     "Тон журналистский но живой",
     "Не выдумывай цитаты и цифры"
   ],
-  "imagePromptTemplate": "Photorealistic editorial photo for Instagram news post about: {{title}}. Cinematic lighting, dramatic composition, 3:4 aspect ratio, no text, no watermark, no logos.",
+  "imagePromptTemplate": "Specific photorealistic editorial scene for Instagram news post about: {{title}}. Show a concrete real-world subject, location, and camera angle tied to the story. Vary composition and color palette by article. Avoid robots, humanoids, cloud icons, generic data streams, and blue-orange cyberpunk unless explicitly required by the article. 3:4 portrait, no text, no watermark, no logos.",
   "examples": [
     {
       "rawTitle": "New study links late-night scrolling to poorer sleep quality",
