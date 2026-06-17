@@ -154,13 +154,23 @@ const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
 const CLOUDINARY_PRESET = process.env.CLOUDINARY_PRESET || 'ml_default';
 const GENERATOR_PLAYBOOK_PATH = process.env.GENERATOR_PLAYBOOK_PATH || path.join(__dirname, 'playbooks', 'instagram-news-core.json');
 const IMAGE_PROVIDER = IMAGE_PROVIDER_ENV;
-const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
+const normalizeOpenAIImageModel = (value) => {
+    const model = String(value || 'gpt-image-2').trim();
+    if (model === 'gpt-image-2v') return 'gpt-image-2';
+    return model;
+};
+const OPENAI_IMAGE_MODEL_RAW = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
+const OPENAI_IMAGE_MODEL = normalizeOpenAIImageModel(OPENAI_IMAGE_MODEL_RAW);
 const OPENAI_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1536';
 const OPENAI_IMAGE_QUALITY = process.env.OPENAI_IMAGE_QUALITY || 'medium';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
 const templateMetaCache = new Map();
 let playbookCache = null;
+
+if (OPENAI_IMAGE_MODEL !== OPENAI_IMAGE_MODEL_RAW) {
+    logger.warn({ raw_model: OPENAI_IMAGE_MODEL_RAW, normalized_model: OPENAI_IMAGE_MODEL }, 'Normalized OPENAI_IMAGE_MODEL');
+}
 
 // ═══════════════════════════════════════
 // DEFAULT PROMPT CONSTANTS (fallbacks when playbook has no custom prompts)
