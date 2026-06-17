@@ -11,15 +11,26 @@ require('dotenv').config();
 // ═══════════════════════════════════════
 const _startupLogger = require('pino')({ name: 'adilflow-generator-startup' });
 
+const IMAGE_PROVIDER_ENV = (process.env.IMAGE_PROVIDER || 'gemini').trim().toLowerCase();
+const SUPPORTED_IMAGE_PROVIDERS = new Set(['gemini', 'openai']);
+
+if (!SUPPORTED_IMAGE_PROVIDERS.has(IMAGE_PROVIDER_ENV)) {
+    _startupLogger.fatal({ image_provider: IMAGE_PROVIDER_ENV }, 'Invalid IMAGE_PROVIDER - expected gemini or openai');
+    process.exit(1);
+}
+
 const REQUIRED_ENV = [
     'GENERATOR_API_KEY',
     'BRAIN_API_KEY',
     'OPENAI_API_KEY',
-    'GEMINI_API_KEY',
     'CLOUDINARY_API_KEY',
     'CLOUDINARY_API_SECRET',
     'RENDER_API_KEY',
 ];
+
+if (IMAGE_PROVIDER_ENV === 'gemini') {
+    REQUIRED_ENV.push('GEMINI_API_KEY');
+}
 
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missingEnv.length > 0) {
@@ -72,7 +83,7 @@ const captionUniquenessStats = {
 // ESM DEPS: p-retry (retry with backoff) + p-queue (concurrency control)
 // ═══════════════════════════════════════
 let pRetry, AbortError;
-let geminiQueue, openaiQueue, cloudinaryQueue;
+let geminiQueue, openaiQueue, openaiImageQueue, cloudinaryQueue;
 
 const esmReady = (async () => {
     const [pRetryMod, PQueueMod] = await Promise.all([
@@ -84,6 +95,7 @@ const esmReady = (async () => {
     const PQueue = PQueueMod.default;
     geminiQueue = new PQueue({ concurrency: 2 });
     openaiQueue = new PQueue({ concurrency: 3 });
+    openaiImageQueue = new PQueue({ concurrency: 2 });
     cloudinaryQueue = new PQueue({ concurrency: 3 });
 })();
 
@@ -141,6 +153,10 @@ const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '';
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
 const CLOUDINARY_PRESET = process.env.CLOUDINARY_PRESET || 'ml_default';
 const GENERATOR_PLAYBOOK_PATH = process.env.GENERATOR_PLAYBOOK_PATH || path.join(__dirname, 'playbooks', 'instagram-news-core.json');
+const IMAGE_PROVIDER = IMAGE_PROVIDER_ENV;
+const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
+const OPENAI_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1536';
+const OPENAI_IMAGE_QUALITY = process.env.OPENAI_IMAGE_QUALITY || 'medium';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
 const templateMetaCache = new Map();
@@ -307,6 +323,7 @@ async function withRetry(fn, { retries = 2, baseDelay = 1000, maxDelay = 8000 } 
 
 const brainBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'brain' });
 const openaiBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'openai' });
+const openaiImageBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'openai_image' });
 const geminiBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'gemini' });
 const cloudinaryBreaker = new CircuitBreaker({ threshold: 5, resetTimeout: 30000, name: 'cloudinary' });
 
@@ -759,7 +776,132 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
     });
 }
 
-async function generateBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null) {
+async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null) {
+    if (!OPENAI_API_KEY) {
+        logger.warn('OPENAI_API_KEY not set, skipping OpenAI image generation');
+        return null;
+    }
+
+    const enhancedPrompt = imageSystemPrompt
+        ? imageSystemPrompt.replace('{{image_prompt}}', imagePrompt)
+        : DEFAULT_IMAGE_SYSTEM_PROMPT(imagePrompt);
+
+    const start = Date.now();
+
+    if (openaiImageBreaker.state === 'OPEN' && Date.now() < openaiImageBreaker.nextAttempt) {
+        logger.warn({ provider: 'openai', action: 'image_gen', outcome: 'cb_open_fallback' }, 'OpenAI image CB OPEN - skipping image generation');
+        logEvent({
+            articleId,
+            kind: 'image_prompt',
+            provider: 'openai',
+            model: OPENAI_IMAGE_MODEL,
+            prompt: { prompt: imagePrompt, system: imageSystemPrompt },
+            response: null,
+            outcome: 'fallback',
+            error: 'circuit_breaker_open',
+            latencyMs: 0
+        }, { logger }).catch(() => {});
+        return null;
+    }
+
+    try {
+        const data = await openaiImageQueue.add(() => openaiImageBreaker.exec(() => pRetry(async () => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 120000);
+            try {
+                const response = await fetch('https://api.openai.com/v1/images/generations', {
+                    method: 'POST',
+                    signal: controller.signal,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${OPENAI_API_KEY}`
+                    },
+                    body: JSON.stringify({
+                        model: OPENAI_IMAGE_MODEL,
+                        prompt: enhancedPrompt,
+                        size: OPENAI_IMAGE_SIZE,
+                        quality: OPENAI_IMAGE_QUALITY,
+                        n: 1
+                    })
+                });
+                const responseText = await response.text();
+                let result = {};
+                try {
+                    result = responseText ? JSON.parse(responseText) : {};
+                } catch {
+                    result = { error: { message: responseText.slice(0, 500) } };
+                }
+                if (!response.ok) {
+                    const message = result.error?.message || JSON.stringify(result).slice(0, 200);
+                    if (response.status >= 400 && response.status < 500) {
+                        throw new AbortError(`OpenAI image ${response.status}: ${message}`);
+                    }
+                    throw new Error(`OpenAI image ${response.status}: ${message}`);
+                }
+                return result;
+            } finally {
+                clearTimeout(timeout);
+            }
+        }, {
+            retries: 2,
+            minTimeout: 2000,
+            onFailedAttempt: (err) => {
+                logger.warn({ provider: 'openai', action: 'image_gen', attempt: err.attemptNumber, retriesLeft: err.retriesLeft, error: err.message, prompt: imagePrompt.slice(0, 50) }, 'OpenAI image retry');
+            }
+        })));
+
+        const b64 = data.data?.[0]?.b64_json;
+        if (b64) {
+            const imageBuffer = Buffer.from(b64, 'base64');
+            const cloudinaryUrl = await uploadBufferToCloudinary(imageBuffer);
+            const latencyMs = Date.now() - start;
+            logger.info({ provider: 'openai', action: 'image_gen', latencyMs, model: OPENAI_IMAGE_MODEL, prompt: imagePrompt.slice(0, 50) }, 'OpenAI image generated and uploaded');
+            logEvent({
+                articleId,
+                kind: 'image_prompt',
+                provider: 'openai',
+                model: OPENAI_IMAGE_MODEL,
+                prompt: { prompt: imagePrompt, system: imageSystemPrompt },
+                response: { image_url: cloudinaryUrl, size: OPENAI_IMAGE_SIZE, quality: OPENAI_IMAGE_QUALITY },
+                outcome: 'ok',
+                latencyMs
+            }, { logger }).catch(() => {});
+            return cloudinaryUrl;
+        }
+
+        const latencyMs = Date.now() - start;
+        logger.warn({ provider: 'openai', action: 'image_gen', latencyMs }, 'OpenAI returned no image data');
+        logEvent({
+            articleId,
+            kind: 'image_prompt',
+            provider: 'openai',
+            model: OPENAI_IMAGE_MODEL,
+            prompt: { prompt: imagePrompt, system: imageSystemPrompt },
+            response: { raw: 'no_b64_json' },
+            outcome: 'fallback',
+            error: 'no_image_data_in_response',
+            latencyMs
+        }, { logger }).catch(() => {});
+        return null;
+    } catch (error) {
+        const latencyMs = Date.now() - start;
+        logger.error({ provider: 'openai', action: 'image_gen', latencyMs, error: error.message, prompt: imagePrompt.slice(0, 50) }, 'OpenAI image generation failed');
+        logEvent({
+            articleId,
+            kind: 'image_prompt',
+            provider: 'openai',
+            model: OPENAI_IMAGE_MODEL,
+            prompt: { prompt: imagePrompt, system: imageSystemPrompt },
+            response: null,
+            outcome: 'error',
+            error: error.message,
+            latencyMs
+        }, { logger }).catch(() => {});
+        return null;
+    }
+}
+
+async function generateGeminiBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null) {
     if (!GEMINI_API_KEY) {
         logger.warn('GEMINI_API_KEY not set, skipping image generation');
         return null;
@@ -878,11 +1020,33 @@ async function generateBackgroundImage(imagePrompt, imageSystemPrompt, articleId
 
 
 // Arbitrary image generation — for logo/design/brand exploration
+async function generateBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null) {
+    if (IMAGE_PROVIDER === 'openai') {
+        const openaiImage = await generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId);
+        if (openaiImage) return openaiImage;
+
+        if (GEMINI_API_KEY) {
+            logger.warn({ provider: 'openai', fallback_provider: 'gemini', articleId }, 'OpenAI image failed - trying Gemini fallback');
+            return generateGeminiBackgroundImage(imagePrompt, imageSystemPrompt, articleId);
+        }
+
+        return null;
+    }
+
+    return generateGeminiBackgroundImage(imagePrompt, imageSystemPrompt, articleId);
+}
+
 app.post('/api/gen-image', authMiddleware, async (req, res) => {
     const { prompt } = req.body || {};
     if (!prompt || typeof prompt !== 'string') {
         return res.status(400).json({ error: 'prompt required (string)' });
     }
+    if (IMAGE_PROVIDER === 'openai') {
+        const cloudUrl = await generateOpenAIBackgroundImage(prompt, null, null);
+        if (!cloudUrl) return res.status(502).json({ error: 'OpenAI image generation failed' });
+        return res.json({ success: true, url: cloudUrl, model: OPENAI_IMAGE_MODEL, provider: 'openai' });
+    }
+
     if (!GEMINI_API_KEY) return res.status(503).json({ error: 'GEMINI_API_KEY not set' });
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
@@ -1271,9 +1435,10 @@ async function processArticle(article, generationConfig) {
     // Use the (possibly regenerated) content going forward
     const content = generated;
 
-    // ALWAYS generate background with Gemini (source image goes to circle overlay)
+    // Generate a background with the configured image provider; source image stays available for overlays/fallbacks.
     let backgroundImage = null;
-    if (content.image_prompt && GEMINI_API_KEY) {
+    const canGenerateBackground = IMAGE_PROVIDER === 'openai' || !!GEMINI_API_KEY;
+    if (content.image_prompt && canGenerateBackground) {
         const imageSystemPrompt = activeConfig?.playbook?.image_system_prompt || null;
         backgroundImage = await generateBackgroundImage(content.image_prompt, imageSystemPrompt, article.id);
     }
@@ -1319,6 +1484,8 @@ app.get('/', (req, res) => {
         status: 'online',
         render_service: RENDER_SERVICE_URL,
         template_id: INSTAGRAM_TEMPLATE_ID,
+        image_provider: IMAGE_PROVIDER,
+        openai_image_model: IMAGE_PROVIDER === 'openai' ? OPENAI_IMAGE_MODEL : null,
         platform: GENERATOR_PLATFORM,
         format: GENERATOR_FORMAT,
         channel_key: GENERATOR_CHANNEL_KEY || null
@@ -1346,6 +1513,7 @@ app.get('/health', async (req, res) => {
         brain_circuit: brainBreaker.getStatus(),
         breakers: {
             openai: openaiBreaker.getStatus(),
+            openai_image: openaiImageBreaker.getStatus(),
             gemini: geminiBreaker.getStatus(),
             cloudinary: cloudinaryBreaker.getStatus()
         },
@@ -1363,6 +1531,8 @@ app.get('/api/config-check', authMiddleware, (req, res) => {
             render_service_url: !!RENDER_SERVICE_URL,
             render_api_key: !!RENDER_API_KEY,
             openai_api_key: !!OPENAI_API_KEY,
+            image_provider: IMAGE_PROVIDER,
+            openai_image_model: !!OPENAI_IMAGE_MODEL,
             gemini_api_key: !!GEMINI_API_KEY,
             cloudinary_cloud_name: !!CLOUDINARY_CLOUD_NAME,
             cloudinary_api_key: !!CLOUDINARY_API_KEY,
@@ -1370,6 +1540,10 @@ app.get('/api/config-check', authMiddleware, (req, res) => {
             template_id: !!INSTAGRAM_TEMPLATE_ID
         },
         template_id: INSTAGRAM_TEMPLATE_ID,
+        image_provider: IMAGE_PROVIDER,
+        openai_image_model: OPENAI_IMAGE_MODEL,
+        openai_image_size: OPENAI_IMAGE_SIZE,
+        openai_image_quality: OPENAI_IMAGE_QUALITY,
         render_service: RENDER_SERVICE_URL
     });
 });
