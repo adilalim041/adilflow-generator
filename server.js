@@ -69,6 +69,10 @@ const {
     findEntityVisualDirective,
     findEditorialSceneDirective
 } = require('./lib/imagePromptDirectives');
+const {
+    personSlugFromName,
+    resolvePersonReferenceAsset
+} = require('./lib/personReferenceDiscovery');
 
 // ═══════════════════════════════════════
 // GENERATION EVENT LOGGER
@@ -170,6 +174,7 @@ const OPENAI_IMAGE_MODEL = normalizeOpenAIImageModel(OPENAI_IMAGE_MODEL_RAW);
 const OPENAI_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1536';
 const OPENAI_IMAGE_QUALITY = process.env.OPENAI_IMAGE_QUALITY || 'medium';
 const OPENAI_IMAGE_REFERENCE_ENABLED = parseEnvBool(process.env.OPENAI_IMAGE_REFERENCE_ENABLED, false);
+const PERSON_REFERENCE_DISCOVERY_ENABLED = parseEnvBool(process.env.PERSON_REFERENCE_DISCOVERY_ENABLED, true);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
 const templateMetaCache = new Map();
@@ -861,46 +866,6 @@ async function brainFetch(path, options = {}) {
             clearTimeout(timeout);
         }
     }, { retries: 2, baseDelay: 1000 }));
-}
-
-function personSlugFromName(name) {
-    return String(name || '')
-        .toLowerCase()
-        .normalize('NFKD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '');
-}
-
-async function resolvePersonReferenceAsset(visualDirective) {
-    if (!OPENAI_IMAGE_REFERENCE_ENABLED || !visualDirective?.entity_slug || !visualDirective?.person) {
-        return null;
-    }
-
-    try {
-        const entitySlug = encodeURIComponent(visualDirective.entity_slug);
-        const data = await brainFetch(`/api/entity-assets?entity_slug=${entitySlug}&asset_type=person_reference&status=approved`, {
-            method: 'GET'
-        });
-        const assets = Array.isArray(data?.assets) ? data.assets : [];
-        const targetPersonSlug = personSlugFromName(visualDirective.person);
-        const targetPersonName = String(visualDirective.person || '').toLowerCase();
-        const matchingAsset = assets.find(asset => {
-            const assetPersonSlug = personSlugFromName(asset?.person_entity_slug || asset?.metadata?.person_slug);
-            const assetPersonName = String(asset?.metadata?.person_name || asset?.display_name || '').toLowerCase();
-            return assetPersonSlug === targetPersonSlug || assetPersonName.includes(targetPersonName);
-        }) || assets[0] || null;
-
-        if (!matchingAsset?.cloudinary_url) return null;
-        return matchingAsset;
-    } catch (error) {
-        logger.warn({
-            entity_slug: visualDirective.entity_slug,
-            person: visualDirective.person,
-            error: error.message
-        }, 'Person reference lookup failed');
-        return null;
-    }
 }
 
 async function getArticlesFromBrain(niche, count) {
@@ -1844,12 +1809,23 @@ async function processArticle(article, generationConfig) {
     // Generate a background with the configured image provider; source image stays available for overlays/fallbacks.
     let backgroundImage = null;
     const canGenerateBackground = IMAGE_PROVIDER === 'openai' || !!GEMINI_API_KEY;
-    const personReferenceAsset = await resolvePersonReferenceAsset(content.visual_directive);
-    if (personReferenceAsset) {
+    const personReference = OPENAI_IMAGE_REFERENCE_ENABLED
+        ? await resolvePersonReferenceAsset({
+            visualDirective: content.visual_directive,
+            brainFetch,
+            uploadBuffer: uploadBufferToCloudinary,
+            logger,
+            discoveryEnabled: PERSON_REFERENCE_DISCOVERY_ENABLED
+        })
+        : { asset: null, source: 'disabled' };
+    const personReferenceAsset = personReference?.asset || null;
+    if (content.visual_directive) {
         content.visual_directive = {
             ...(content.visual_directive || {}),
-            person_reference_asset_id: personReferenceAsset.id || null,
-            person_reference_mode: OPENAI_IMAGE_REFERENCE_ENABLED ? 'openai_image_edit' : 'disabled'
+            person_reference_asset_id: personReferenceAsset?.id || null,
+            person_reference_source: personReference?.source || null,
+            person_reference_mode: personReferenceAsset ? 'openai_image_edit' : 'text_only',
+            person_reference_error: personReference?.error || null
         };
     }
     if (content.image_prompt && canGenerateBackground) {
@@ -1909,6 +1885,7 @@ app.get('/', (req, res) => {
         image_provider: IMAGE_PROVIDER,
         openai_image_model: IMAGE_PROVIDER === 'openai' ? OPENAI_IMAGE_MODEL : null,
         openai_image_reference_enabled: IMAGE_PROVIDER === 'openai' ? OPENAI_IMAGE_REFERENCE_ENABLED : false,
+        person_reference_discovery_enabled: IMAGE_PROVIDER === 'openai' ? PERSON_REFERENCE_DISCOVERY_ENABLED : false,
         platform: GENERATOR_PLATFORM,
         format: GENERATOR_FORMAT,
         channel_key: GENERATOR_CHANNEL_KEY || null
