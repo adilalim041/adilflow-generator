@@ -39,6 +39,28 @@ describe('image prompt entity directives', () => {
         expect(prompt).toContain('real brand logo overlay');
     });
 
+    it('prioritizes the title brand over body mentions of competing brands', () => {
+        const directive = findEntityVisualDirective({
+            raw_title: 'Anthropic hands the public Mythos-class AI',
+            raw_summary: 'The article compares the release with OpenAI and GPT products.',
+            raw_text: 'OpenAI, ChatGPT, GPT, and Codex are mentioned as market context, but the story is about Anthropic.'
+        });
+
+        expect(directive.slug).toBe('anthropic');
+
+        const prompt = applyEntityImagePromptDirectives(
+            {
+                raw_title: 'Anthropic hands the public Mythos-class AI',
+                raw_summary: 'The article compares the release with OpenAI and GPT products.',
+                raw_text: 'OpenAI, ChatGPT, GPT, and Codex are mentioned as market context, but the story is about Anthropic.'
+            },
+            'A photorealistic editorial scene about the launch.'
+        );
+
+        expect(prompt).toContain('Dario Amodei');
+        expect(prompt).not.toContain('Sam Altman');
+    });
+
     it('adds the right public figure for other major AI brands', () => {
         expect(applyEntityImagePromptDirectives(
             { raw_title: 'Meta releases a new Llama model' },
