@@ -63,6 +63,7 @@ const logger = pino({ name: 'adilflow-generator' });
 // CAPTION UNIQUENESS HELPER
 // ═══════════════════════════════════════
 const { checkCaptionUniqueness, nextAngle } = require('./lib/captionUniqueness');
+const { resolveEntityLogoAsset } = require('./lib/entityAssetDiscovery');
 
 // ═══════════════════════════════════════
 // GENERATION EVENT LOGGER
@@ -677,6 +678,9 @@ function buildTemplateValueMap(article, content) {
     const sourceImage = getSourceImage(article);
     // Use generated background if available (set by processArticle via Gemini)
     const effectiveImage = article._generatedBackground || sourceImage;
+    const entityLogoAsset = article._entityLogoAsset?.asset || null;
+    const entityLogoUrl = entityLogoAsset?.cloudinary_url || '';
+    const entityInfo = article._entityLogoAsset?.entity || null;
     return {
         headline: content.headline_ru || '',
         headline2: content.headline2_ru || '',
@@ -695,7 +699,14 @@ function buildTemplateValueMap(article, content) {
         rawSummary: article.raw_summary || '',
         imagePrompt: content.image_prompt || '',
         generatedImage: article._generatedBackground || article.generated_image || '',
-        generated_image: article._generatedBackground || article.generated_image || ''
+        generated_image: article._generatedBackground || article.generated_image || '',
+        companyLogoUrl: entityLogoUrl,
+        company_logo_url: entityLogoUrl,
+        logoUrl: entityLogoUrl,
+        logo_url: entityLogoUrl,
+        entitySlug: entityInfo?.slug || '',
+        entityName: entityInfo?.name || '',
+        companyName: entityInfo?.name || ''
     };
 }
 
@@ -881,7 +892,7 @@ async function markArticleFailed(articleId, message) {
     }
 }
 
-async function saveToBrain(articleId, content, coverImage, templateMeta, renderInfo, generationConfig, generatedBackground) {
+async function saveToBrain(articleId, content, coverImage, templateMeta, renderInfo, generationConfig, generatedBackground, entityLogoAsset) {
     return brainFetch(`/api/articles/${articleId}/generated`, {
         method: 'POST',
         body: JSON.stringify({
@@ -909,7 +920,16 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
                 template_missing_variables: renderInfo?.missing || [],
                 template_fit_ok: renderInfo?.fit?.ok !== false,
                 template_fit_issues: renderInfo?.fit?.issues || [],
-                template_text_adjustments: renderInfo?.adjustments || []
+                template_text_adjustments: renderInfo?.adjustments || [],
+                entity_logo_asset: entityLogoAsset ? {
+                    source: entityLogoAsset.source || null,
+                    entity_slug: entityLogoAsset.entity?.slug || null,
+                    entity_name: entityLogoAsset.entity?.name || null,
+                    asset_id: entityLogoAsset.asset?.id || null,
+                    asset_type: entityLogoAsset.asset?.asset_type || null,
+                    cloudinary_url: entityLogoAsset.asset?.cloudinary_url || null,
+                    error: entityLogoAsset.error || null
+                } : null
             }
         })
     });
@@ -1532,18 +1552,22 @@ async function uploadToCloudinary(imageBuffer, mimeType = 'image/png') {
     return result;
 }
 
-async function uploadBufferToCloudinary(buffer) {
+async function uploadBufferToCloudinary(buffer, options = {}) {
     const start = Date.now();
     if (cloudinaryBreaker.state === 'OPEN' && Date.now() < cloudinaryBreaker.nextAttempt) {
         logger.warn({ provider: 'cloudinary', action: 'buffer_upload', outcome: 'cb_open' }, 'Cloudinary CB OPEN — buffer upload unavailable');
         throw Object.assign(new Error('Cloudinary circuit breaker OPEN — buffer upload unavailable'), { code: 'CB_OPEN' });
     }
     const url = await cloudinaryQueue.add(() => cloudinaryBreaker.exec(() => pRetry(async () => {
+        const {
+            mimeType = 'image/png',
+            folder = 'adilflow_instagram',
+            filename = 'generated.png'
+        } = options || {};
         const timestamp = Math.floor(Date.now() / 1000);
-        const folder = 'adilflow_instagram';
         const formData = new FormData();
-        const blob = new Blob([buffer], { type: 'image/png' });
-        formData.append('file', blob, 'generated.png');
+        const blob = new Blob([buffer], { type: mimeType });
+        formData.append('file', blob, filename);
         formData.append('folder', folder);
         formData.append('timestamp', timestamp.toString());
 
@@ -1639,6 +1663,12 @@ async function processArticle(article, generationConfig) {
 
     // Store generated background so buildTemplateValueMap can use it
     article._generatedBackground = backgroundImage;
+    article._entityLogoAsset = await resolveEntityLogoAsset({
+        article,
+        brainFetch,
+        uploadBuffer: uploadBufferToCloudinary,
+        logger
+    });
 
     const templateMeta = await fetchTemplateMeta(templateId);
     const prepared = await prepareTemplateRender(article, content, templateMeta);
@@ -1649,7 +1679,7 @@ async function processArticle(article, generationConfig) {
     }
 
     const { coverImage } = await renderCover(article, prepared.content, templateMeta);
-    await saveToBrain(article.id, prepared.content, coverImage, templateMeta, prepared.renderInfo, activeConfig, article._generatedBackground);
+    await saveToBrain(article.id, prepared.content, coverImage, templateMeta, prepared.renderInfo, activeConfig, article._generatedBackground, article._entityLogoAsset);
 
     return {
         id: article.id,
