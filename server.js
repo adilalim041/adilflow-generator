@@ -64,7 +64,11 @@ const logger = pino({ name: 'adilflow-generator' });
 // ═══════════════════════════════════════
 const { checkCaptionUniqueness, nextAngle } = require('./lib/captionUniqueness');
 const { resolveEntityLogoAsset } = require('./lib/entityAssetDiscovery');
-const { applyEntityImagePromptDirectives, findEntityVisualDirective } = require('./lib/imagePromptDirectives');
+const {
+    applyEntityImagePromptDirectives,
+    findEntityVisualDirective,
+    findEditorialSceneDirective
+} = require('./lib/imagePromptDirectives');
 
 // ═══════════════════════════════════════
 // GENERATION EVENT LOGGER
@@ -165,6 +169,7 @@ const OPENAI_IMAGE_MODEL_RAW = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
 const OPENAI_IMAGE_MODEL = normalizeOpenAIImageModel(OPENAI_IMAGE_MODEL_RAW);
 const OPENAI_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1536';
 const OPENAI_IMAGE_QUALITY = process.env.OPENAI_IMAGE_QUALITY || 'medium';
+const OPENAI_IMAGE_REFERENCE_ENABLED = parseEnvBool(process.env.OPENAI_IMAGE_REFERENCE_ENABLED, false);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
 const templateMetaCache = new Map();
@@ -387,6 +392,11 @@ function parseJsonSafely(text) {
     } catch {
         return { raw: text };
     }
+}
+
+function parseEnvBool(value, fallback = false) {
+    if (value == null || value === '') return fallback;
+    return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
 }
 
 function isBlank(value) {
@@ -673,10 +683,12 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     merged.image_prompt = normalizeImagePromptForDiversity(article, merged.image_prompt);
     merged.image_prompt = applyEntityImagePromptDirectives(article, merged.image_prompt);
     const visualDirective = findEntityVisualDirective(article);
+    const editorialSceneDirective = visualDirective ? findEditorialSceneDirective(article) : null;
     if (visualDirective) {
         merged.visual_directive = {
             entity_slug: visualDirective.slug,
             person: visualDirective.person,
+            scene_slug: editorialSceneDirective?.slug || null,
             layout: 'foreground_person_with_upper_left_logo_backdrop_plane',
             logo_layer_strategy: 'real_template_overlay_not_ai_generated'
         };
@@ -851,6 +863,46 @@ async function brainFetch(path, options = {}) {
     }, { retries: 2, baseDelay: 1000 }));
 }
 
+function personSlugFromName(name) {
+    return String(name || '')
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
+async function resolvePersonReferenceAsset(visualDirective) {
+    if (!OPENAI_IMAGE_REFERENCE_ENABLED || !visualDirective?.entity_slug || !visualDirective?.person) {
+        return null;
+    }
+
+    try {
+        const entitySlug = encodeURIComponent(visualDirective.entity_slug);
+        const data = await brainFetch(`/api/entity-assets?entity_slug=${entitySlug}&asset_type=person_reference&status=approved`, {
+            method: 'GET'
+        });
+        const assets = Array.isArray(data?.assets) ? data.assets : [];
+        const targetPersonSlug = personSlugFromName(visualDirective.person);
+        const targetPersonName = String(visualDirective.person || '').toLowerCase();
+        const matchingAsset = assets.find(asset => {
+            const assetPersonSlug = personSlugFromName(asset?.person_entity_slug || asset?.metadata?.person_slug);
+            const assetPersonName = String(asset?.metadata?.person_name || asset?.display_name || '').toLowerCase();
+            return assetPersonSlug === targetPersonSlug || assetPersonName.includes(targetPersonName);
+        }) || assets[0] || null;
+
+        if (!matchingAsset?.cloudinary_url) return null;
+        return matchingAsset;
+    } catch (error) {
+        logger.warn({
+            entity_slug: visualDirective.entity_slug,
+            person: visualDirective.person,
+            error: error.message
+        }, 'Person reference lookup failed');
+        return null;
+    }
+}
+
 async function getArticlesFromBrain(niche, count) {
     const data = await brainFetch(`/api/articles/ready?niche=${encodeURIComponent(niche)}&limit=${count}`, {
         method: 'GET',
@@ -948,7 +1000,86 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
     });
 }
 
-async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null) {
+function assertOpenAIReferenceUrl(rawUrl) {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:') {
+        throw new Error('Reference image must use https');
+    }
+    if (parsed.username || parsed.password) {
+        throw new Error('Reference image URL must not contain credentials');
+    }
+    if (parsed.hostname !== 'res.cloudinary.com') {
+        throw new Error(`Reference image host is not allowlisted: ${parsed.hostname}`);
+    }
+    return parsed;
+}
+
+async function downloadOpenAIReferenceImage(asset) {
+    const rawUrl = asset?.cloudinary_url;
+    if (!rawUrl) throw new Error('Missing reference image URL');
+    assertOpenAIReferenceUrl(rawUrl);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+        const response = await fetch(rawUrl, {
+            method: 'GET',
+            redirect: 'follow',
+            signal: controller.signal,
+            headers: { Accept: 'image/png,image/jpeg,image/webp,image/*;q=0.8,*/*;q=0.1' }
+        });
+        if (!response.ok) {
+            throw new Error(`Reference image returned ${response.status}`);
+        }
+
+        const finalUrl = response.url || rawUrl;
+        assertOpenAIReferenceUrl(finalUrl);
+
+        const mimeType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        if (!['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)) {
+            throw new Error(`Unsupported reference image content-type: ${mimeType || 'unknown'}`);
+        }
+
+        const contentLength = Number(response.headers.get('content-length') || 0);
+        if (contentLength > 8_000_000) {
+            throw new Error('Reference image is too large');
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        if (arrayBuffer.byteLength > 8_000_000) {
+            throw new Error('Reference image is too large');
+        }
+        if (arrayBuffer.byteLength < 1000) {
+            throw new Error('Reference image is unexpectedly small');
+        }
+
+        return {
+            buffer: Buffer.from(arrayBuffer),
+            mimeType,
+            filename: `${personSlugFromName(asset?.person_entity_slug || asset?.display_name || 'person-reference')}.${mimeType.split('/')[1] || 'png'}`
+        };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function prepareOpenAIReferenceImages(referenceAssets) {
+    const assets = (referenceAssets || []).filter(asset => asset?.cloudinary_url);
+    if (!OPENAI_IMAGE_REFERENCE_ENABLED || assets.length === 0) return [];
+
+    const prepared = [];
+    for (const asset of assets.slice(0, 2)) {
+        const downloaded = await downloadOpenAIReferenceImage(asset);
+        prepared.push({
+            asset,
+            blob: new Blob([downloaded.buffer], { type: downloaded.mimeType }),
+            filename: downloaded.filename
+        });
+    }
+    return prepared;
+}
+
+async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null, options = {}) {
     if (!OPENAI_API_KEY) {
         logger.warn('OPENAI_API_KEY not set, skipping OpenAI image generation');
         return null;
@@ -958,6 +1089,22 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
         ? imageSystemPrompt.replace('{{image_prompt}}', imagePrompt)
         : DEFAULT_IMAGE_SYSTEM_PROMPT(imagePrompt);
     const finalImagePrompt = `${enhancedPrompt}\n\n${IMAGE_STYLE_DIVERSITY_GUARD}`;
+    let preparedReferences = [];
+    if (!options.skipReferences) {
+        try {
+            preparedReferences = await prepareOpenAIReferenceImages(options.referenceAssets || []);
+        } catch (error) {
+            logger.warn({ articleId, error: error.message }, 'OpenAI image reference preparation failed; falling back to text-only image generation');
+            preparedReferences = [];
+        }
+    }
+    const promptWithReferenceInstruction = preparedReferences.length > 0
+        ? [
+            finalImagePrompt,
+            'Use the uploaded reference image only for facial identity and general likeness of the named public figure.',
+            'Create a new symbolic editorial scene; do not recreate the source photo and do not imply the exact scene is a real event.'
+        ].join('\n\n')
+        : finalImagePrompt;
 
     const start = Date.now();
 
@@ -982,20 +1129,39 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 120000);
             try {
-                const response = await fetch('https://api.openai.com/v1/images/generations', {
+                let endpoint = 'https://api.openai.com/v1/images/generations';
+                let headers = {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${OPENAI_API_KEY}`
+                };
+                let body = JSON.stringify({
+                    model: OPENAI_IMAGE_MODEL,
+                    prompt: promptWithReferenceInstruction,
+                    size: OPENAI_IMAGE_SIZE,
+                    quality: OPENAI_IMAGE_QUALITY,
+                    n: 1
+                });
+
+                if (preparedReferences.length > 0) {
+                    endpoint = 'https://api.openai.com/v1/images/edits';
+                    const formData = new FormData();
+                    formData.append('model', OPENAI_IMAGE_MODEL);
+                    formData.append('prompt', promptWithReferenceInstruction);
+                    formData.append('size', OPENAI_IMAGE_SIZE);
+                    formData.append('quality', OPENAI_IMAGE_QUALITY);
+                    formData.append('n', '1');
+                    for (const reference of preparedReferences) {
+                        formData.append('image[]', reference.blob, reference.filename);
+                    }
+                    headers = { Authorization: `Bearer ${OPENAI_API_KEY}` };
+                    body = formData;
+                }
+
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     signal: controller.signal,
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: `Bearer ${OPENAI_API_KEY}`
-                    },
-                    body: JSON.stringify({
-                        model: OPENAI_IMAGE_MODEL,
-                        prompt: finalImagePrompt,
-                        size: OPENAI_IMAGE_SIZE,
-                        quality: OPENAI_IMAGE_QUALITY,
-                        n: 1
-                    })
+                    headers,
+                    body
                 });
                 const responseText = await response.text();
                 let result = {};
@@ -1035,7 +1201,12 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
                 provider: 'openai',
                 model: OPENAI_IMAGE_MODEL,
                 prompt: { prompt: imagePrompt, system: imageSystemPrompt },
-                response: { image_url: cloudinaryUrl, size: OPENAI_IMAGE_SIZE, quality: OPENAI_IMAGE_QUALITY },
+                response: {
+                    image_url: cloudinaryUrl,
+                    size: OPENAI_IMAGE_SIZE,
+                    quality: OPENAI_IMAGE_QUALITY,
+                    reference_asset_ids: preparedReferences.map(reference => reference.asset?.id).filter(Boolean)
+                },
                 outcome: 'ok',
                 latencyMs
             }, { logger }).catch(() => {});
@@ -1058,6 +1229,14 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
         return null;
     } catch (error) {
         const latencyMs = Date.now() - start;
+        if (preparedReferences.length > 0 && !options.skipReferences) {
+            logger.warn({ provider: 'openai', action: 'image_gen', latencyMs, error: error.message }, 'OpenAI reference image edit failed - retrying text-only generation');
+            return generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId, {
+                ...options,
+                referenceAssets: [],
+                skipReferences: true
+            });
+        }
         logger.error({ provider: 'openai', action: 'image_gen', latencyMs, error: error.message, prompt: imagePrompt.slice(0, 50) }, 'OpenAI image generation failed');
         logEvent({
             articleId,
@@ -1194,9 +1373,9 @@ async function generateGeminiBackgroundImage(imagePrompt, imageSystemPrompt, art
 
 
 // Arbitrary image generation — for logo/design/brand exploration
-async function generateBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null) {
+async function generateBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null, options = {}) {
     if (IMAGE_PROVIDER === 'openai') {
-        const openaiImage = await generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId);
+        const openaiImage = await generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId, options);
         if (openaiImage) return openaiImage;
 
         if (GEMINI_API_KEY) {
@@ -1665,9 +1844,19 @@ async function processArticle(article, generationConfig) {
     // Generate a background with the configured image provider; source image stays available for overlays/fallbacks.
     let backgroundImage = null;
     const canGenerateBackground = IMAGE_PROVIDER === 'openai' || !!GEMINI_API_KEY;
+    const personReferenceAsset = await resolvePersonReferenceAsset(content.visual_directive);
+    if (personReferenceAsset) {
+        content.visual_directive = {
+            ...(content.visual_directive || {}),
+            person_reference_asset_id: personReferenceAsset.id || null,
+            person_reference_mode: OPENAI_IMAGE_REFERENCE_ENABLED ? 'openai_image_edit' : 'disabled'
+        };
+    }
     if (content.image_prompt && canGenerateBackground) {
         const imageSystemPrompt = activeConfig?.playbook?.image_system_prompt || null;
-        backgroundImage = await generateBackgroundImage(content.image_prompt, imageSystemPrompt, article.id);
+        backgroundImage = await generateBackgroundImage(content.image_prompt, imageSystemPrompt, article.id, {
+            referenceAssets: personReferenceAsset ? [personReferenceAsset] : []
+        });
     }
     if (!backgroundImage) {
         // Fallback: use source image as background if Gemini fails
@@ -1719,6 +1908,7 @@ app.get('/', (req, res) => {
         template_id: INSTAGRAM_TEMPLATE_ID,
         image_provider: IMAGE_PROVIDER,
         openai_image_model: IMAGE_PROVIDER === 'openai' ? OPENAI_IMAGE_MODEL : null,
+        openai_image_reference_enabled: IMAGE_PROVIDER === 'openai' ? OPENAI_IMAGE_REFERENCE_ENABLED : false,
         platform: GENERATOR_PLATFORM,
         format: GENERATOR_FORMAT,
         channel_key: GENERATOR_CHANNEL_KEY || null

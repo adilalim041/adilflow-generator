@@ -3,6 +3,7 @@ import directives from '../lib/imagePromptDirectives.js';
 
 const {
     findEntityVisualDirective,
+    findEditorialSceneDirective,
     applyEntityImagePromptDirectives
 } = directives;
 
@@ -37,6 +38,7 @@ describe('image prompt entity directives', () => {
         expect(prompt).toContain('Dario Amodei');
         expect(prompt).toContain('Anthropic or Claude story');
         expect(prompt).toContain('real brand logo overlay');
+        expect(prompt).toContain('Storyboard: product workflow scene');
     });
 
     it('prioritizes the title brand over body mentions of competing brands', () => {
@@ -58,6 +60,42 @@ describe('image prompt entity directives', () => {
         );
 
         expect(prompt).toContain('Dario Amodei');
+        expect(prompt).not.toContain('Sam Altman');
+    });
+
+    it('adds model reveal storyboard for benchmark and model launch stories', () => {
+        const article = {
+            raw_title: 'Anthropic released Mythos-class AI with new benchmark records',
+            raw_summary: 'The release includes higher scores and frontier model performance.'
+        };
+
+        const scene = findEditorialSceneDirective(article);
+        const prompt = applyEntityImagePromptDirectives(
+            article,
+            'A photorealistic editorial scene about the launch.'
+        );
+
+        expect(scene.slug).toBe('benchmark-model-launch');
+        expect(prompt).toContain('Storyboard: dramatic product/model reveal');
+        expect(prompt).toContain('Dario Amodei');
+    });
+
+    it('adds political pressure storyboard for Anthropic government stories', () => {
+        const article = {
+            raw_title: 'Anthropic to meet with Trump administration over Mythos/Fable dispute',
+            raw_summary: 'The company is discussing AI policy with the US government.'
+        };
+
+        const scene = findEditorialSceneDirective(article);
+        const prompt = applyEntityImagePromptDirectives(
+            article,
+            'A photorealistic editorial scene about a policy dispute.'
+        );
+
+        expect(scene.slug).toBe('government-pressure');
+        expect(prompt).toContain('Dario Amodei');
+        expect(prompt).toContain('high-stakes satirical political editorial composite');
+        expect(prompt).toContain('oversized official shoe');
         expect(prompt).not.toContain('Sam Altman');
     });
 
