@@ -688,7 +688,7 @@ function buildTemplateValueMap(article, content) {
         conclusion: content.hashtags || '',
         imageUrl: effectiveImage,
         image_url: effectiveImage,
-        imageUrl2: (article._generatedBackground && sourceImage) ? sourceImage : '',
+        imageUrl2: entityLogoUrl || ((article._generatedBackground && sourceImage) ? sourceImage : ''),
         sourceImage,
         source_name: article.source_name || '',
         sourceName: article.source_name || '',
