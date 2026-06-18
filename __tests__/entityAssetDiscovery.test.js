@@ -4,6 +4,7 @@ import discovery from '../lib/entityAssetDiscovery.js';
 const {
     selectMentionedEntity,
     getTrustedLogoCandidates,
+    buildWhiteLogoBadgeSvg,
     assertTrustedLogoUrl,
     resolveEntityLogoAsset
 } = discovery;
@@ -32,6 +33,15 @@ describe('entity asset discovery', () => {
         expect(getTrustedLogoCandidates('xai')).toEqual([]);
     });
 
+    it('wraps raw logos in a white circular badge svg', () => {
+        const rawLogo = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><path fill="#000" d="M0 0h10v10H0z"/></svg>');
+        const badge = buildWhiteLogoBadgeSvg(rawLogo, 'image/svg+xml').toString('utf8');
+
+        expect(badge).toContain('fill="#ffffff"');
+        expect(badge).toContain('data:image/svg+xml;base64,');
+        expect(badge).toContain('preserveAspectRatio="xMidYMid meet"');
+    });
+
     it('uses cached approved logo assets without downloading', async () => {
         const brainFetch = vi.fn(async (path) => {
             if (path.startsWith('/api/entities')) {
@@ -49,7 +59,8 @@ describe('entity asset discovery', () => {
                             entity_slug: 'openai',
                             asset_type: 'logo_icon',
                             status: 'approved',
-                            cloudinary_url: 'https://res.cloudinary.com/demo/image/upload/openai.svg'
+                            cloudinary_url: 'https://res.cloudinary.com/demo/image/upload/openai.svg',
+                            metadata: { white_badge: true }
                         }
                     ]
                 };
@@ -70,6 +81,111 @@ describe('entity asset discovery', () => {
         expect(result.source).toBe('cache');
         expect(result.entity.slug).toBe('openai');
         expect(result.asset.cloudinary_url).toContain('cloudinary');
+        expect(fetchImpl).not.toHaveBeenCalled();
+        expect(uploadBuffer).not.toHaveBeenCalled();
+    });
+
+    it('rebuilds legacy transparent cached logos as white badges', async () => {
+        const brainFetch = vi.fn(async (path, options = {}) => {
+            if (path.startsWith('/api/entities')) {
+                return {
+                    entities: [
+                        { slug: 'anthropic', name: 'Anthropic', entity_type: 'company', aliases: ['Claude'] }
+                    ]
+                };
+            }
+            if (path.startsWith('/api/entity-assets') && options.method !== 'POST') {
+                return {
+                    assets: [
+                        {
+                            id: 1,
+                            entity_slug: 'anthropic',
+                            asset_type: 'logo_icon',
+                            status: 'approved',
+                            cloudinary_url: 'https://res.cloudinary.com/demo/image/upload/transparent.svg',
+                            metadata: { white_badge: false }
+                        }
+                    ]
+                };
+            }
+            if (path === '/api/entity-assets' && options.method === 'POST') {
+                return {
+                    asset: {
+                        id: 1,
+                        entity_slug: 'anthropic',
+                        asset_type: 'logo_icon',
+                        status: 'approved',
+                        cloudinary_url: 'https://res.cloudinary.com/demo/image/upload/anthropic-badge.svg',
+                        metadata: JSON.parse(options.body).metadata
+                    }
+                };
+            }
+            throw new Error(`Unexpected path ${path}`);
+        });
+        const fetchImpl = vi.fn(async () => ({
+            ok: true,
+            url: 'https://cdn.simpleicons.org/anthropic/000000',
+            headers: new Map([['content-type', 'image/svg+xml'], ['content-length', '120']]),
+            arrayBuffer: async () => Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h10v10H0z"/></svg>').buffer
+        }));
+        const uploadBuffer = vi.fn(async (buffer, options) => {
+            expect(options.mimeType).toBe('image/svg+xml');
+            expect(buffer.toString('utf8')).toContain('fill="#ffffff"');
+            return 'https://res.cloudinary.com/demo/image/upload/anthropic-badge.svg';
+        });
+
+        const result = await resolveEntityLogoAsset({
+            article: { id: 11, raw_title: 'Anthropic releases new Claude model' },
+            brainFetch,
+            uploadBuffer,
+            fetchImpl,
+            logger: { warn: vi.fn() }
+        });
+
+        expect(result.source).toBe('discovered');
+        expect(result.asset.metadata.white_badge).toBe(true);
+        expect(fetchImpl).toHaveBeenCalled();
+        expect(uploadBuffer).toHaveBeenCalled();
+    });
+
+    it('keeps a legacy cached logo when no trusted candidate exists', async () => {
+        const brainFetch = vi.fn(async (path) => {
+            if (path.startsWith('/api/entities')) {
+                return {
+                    entities: [
+                        { slug: 'xai', name: 'xAI', entity_type: 'company', aliases: ['Grok'] }
+                    ]
+                };
+            }
+            if (path.startsWith('/api/entity-assets')) {
+                return {
+                    assets: [
+                        {
+                            id: 3,
+                            entity_slug: 'xai',
+                            asset_type: 'logo_icon',
+                            status: 'approved',
+                            cloudinary_url: 'https://res.cloudinary.com/demo/image/upload/xai.svg',
+                            metadata: {}
+                        }
+                    ]
+                };
+            }
+            throw new Error(`Unexpected path ${path}`);
+        });
+        const uploadBuffer = vi.fn();
+        const fetchImpl = vi.fn();
+
+        const result = await resolveEntityLogoAsset({
+            article: { id: 12, raw_title: 'xAI releases a new Grok model' },
+            brainFetch,
+            uploadBuffer,
+            fetchImpl,
+            logger: { warn: vi.fn() }
+        });
+
+        expect(result.source).toBe('cache_legacy');
+        expect(result.asset.cloudinary_url).toContain('xai.svg');
         expect(fetchImpl).not.toHaveBeenCalled();
         expect(uploadBuffer).not.toHaveBeenCalled();
     });

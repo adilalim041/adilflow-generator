@@ -64,6 +64,7 @@ const logger = pino({ name: 'adilflow-generator' });
 // ═══════════════════════════════════════
 const { checkCaptionUniqueness, nextAngle } = require('./lib/captionUniqueness');
 const { resolveEntityLogoAsset } = require('./lib/entityAssetDiscovery');
+const { applyEntityImagePromptDirectives } = require('./lib/imagePromptDirectives');
 
 // ═══════════════════════════════════════
 // GENERATION EVENT LOGGER
@@ -670,6 +671,7 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
         merged.image_prompt = buildImagePrompt(article, merged.angle, playbook);
     }
     merged.image_prompt = normalizeImagePromptForDiversity(article, merged.image_prompt);
+    merged.image_prompt = applyEntityImagePromptDirectives(article, merged.image_prompt);
 
     return merged;
 }
