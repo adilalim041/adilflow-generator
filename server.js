@@ -64,7 +64,7 @@ const logger = pino({ name: 'adilflow-generator' });
 // ═══════════════════════════════════════
 const { checkCaptionUniqueness, nextAngle } = require('./lib/captionUniqueness');
 const { resolveEntityLogoAsset } = require('./lib/entityAssetDiscovery');
-const { applyEntityImagePromptDirectives } = require('./lib/imagePromptDirectives');
+const { applyEntityImagePromptDirectives, findEntityVisualDirective } = require('./lib/imagePromptDirectives');
 
 // ═══════════════════════════════════════
 // GENERATION EVENT LOGGER
@@ -672,6 +672,15 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     }
     merged.image_prompt = normalizeImagePromptForDiversity(article, merged.image_prompt);
     merged.image_prompt = applyEntityImagePromptDirectives(article, merged.image_prompt);
+    const visualDirective = findEntityVisualDirective(article);
+    if (visualDirective) {
+        merged.visual_directive = {
+            entity_slug: visualDirective.slug,
+            person: visualDirective.person,
+            layout: 'foreground_person_with_upper_left_logo_backdrop_plane',
+            logo_layer_strategy: 'real_template_overlay_not_ai_generated'
+        };
+    }
 
     return merged;
 }
@@ -917,6 +926,7 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
                 playbook_key: generationConfig?.playbook?.key || null,
                 template_binding_id: generationConfig?.templateBinding?.id || null,
                 image_strategy: content.image_strategy || 'use_original',
+                visual_directive: content.visual_directive || null,
                 image_assessment: content.image_assessment || null,
                 template_required_variables: renderInfo?.requiredVariables || [],
                 template_missing_variables: renderInfo?.missing || [],
@@ -930,6 +940,7 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
                     asset_id: entityLogoAsset.asset?.id || null,
                     asset_type: entityLogoAsset.asset?.asset_type || null,
                     cloudinary_url: entityLogoAsset.asset?.cloudinary_url || null,
+                    white_badge: entityLogoAsset.asset?.metadata?.white_badge === true,
                     error: entityLogoAsset.error || null
                 } : null
             }
