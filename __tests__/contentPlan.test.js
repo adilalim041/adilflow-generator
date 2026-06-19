@@ -5,6 +5,13 @@ describe('Brain content plan adapter', () => {
     it('maps scores_detail.content_plan into Generator content fields', () => {
         const article = {
             scores_detail: {
+                article_brief: {
+                    assets_required: {
+                        needs_generated_background: true,
+                        needs_company_logo: true,
+                        needs_person_reference: true
+                    }
+                },
                 content_plan: {
                     version: 1,
                     source: 'llm',
@@ -18,10 +25,7 @@ describe('Brain content plan adapter', () => {
                     },
                     visual: {
                         image_prompt: 'Dario Amodei squeezed by a giant government stamp, photorealistic satire, no text, no logos.',
-                        angle: 'government-pressure',
-                        image_strategy: 'generate_if_available',
-                        needs_company_logo: true,
-                        needs_person_reference: true
+                        angle: 'government-pressure'
                     }
                 }
             }
@@ -35,6 +39,7 @@ describe('Brain content plan adapter', () => {
         expect(content.angle).toBe('government-pressure');
         expect(content.template_id).toBe('ctrl-light-news');
         expect(content.content_plan_source).toBe('llm');
+        expect(content.image_strategy).toBe('generate_if_available');
     });
 
     it('returns null when no executable plan exists', () => {
