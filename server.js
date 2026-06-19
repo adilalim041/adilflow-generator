@@ -712,6 +712,9 @@ function buildTemplateValueMap(article, content) {
     return {
         headline: content.headline_ru || '',
         headline2: content.headline2_ru || '',
+        subtitle: content.headline2_ru || '',
+        cta: content.cta_ru || 'Самые быстрые новости от ИИ\nПодписывайся',
+        callToAction: content.cta_ru || 'Самые быстрые новости от ИИ\nПодписывайся',
         body: content.caption_ru || '',
         conclusion: content.hashtags || '',
         imageUrl: effectiveImage,
