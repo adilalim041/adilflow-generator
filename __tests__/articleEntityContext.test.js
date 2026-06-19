@@ -41,4 +41,29 @@ describe('article entity context', () => {
 
         expect(directive).toBeNull();
     });
+
+    it('prefers article_brief company/person over fallback entity matching', () => {
+        const directive = buildEntityVisualDirectiveFromBrain(
+            {
+                raw_title: 'Anthropic and OpenAI are mentioned in the same story',
+                scores_detail: {
+                    article_brief: {
+                        entities: {
+                            main_company: 'Anthropic',
+                            main_people: ['Dario Amodei']
+                        }
+                    }
+                }
+            },
+            [
+                { slug: 'openai', name: 'OpenAI', entity_type: 'company', aliases: ['ChatGPT'] },
+                { slug: 'sam-altman', name: 'Sam Altman', entity_type: 'person', parent_entity_slug: 'openai' },
+                { slug: 'anthropic', name: 'Anthropic', entity_type: 'company', aliases: ['Claude'] }
+            ]
+        );
+
+        expect(directive.slug).toBe('anthropic');
+        expect(directive.person).toBe('Dario Amodei');
+        expect(directive.source).toBe('article_brief');
+    });
 });

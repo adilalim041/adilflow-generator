@@ -997,6 +997,7 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
                 template_fit_ok: renderInfo?.fit?.ok !== false,
                 template_fit_issues: renderInfo?.fit?.issues || [],
                 template_text_adjustments: renderInfo?.adjustments || [],
+                required_visual_assets: content.required_visual_assets || null,
                 entity_logo_asset: entityLogoAsset ? {
                     source: entityLogoAsset.source || null,
                     entity_slug: entityLogoAsset.entity?.slug || null,
@@ -1010,6 +1011,129 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
             }
         })
     });
+}
+
+function getArticleBriefRequiredAssets(article) {
+    return article?.scores_detail?.article_brief?.assets_required || {};
+}
+
+function getRequiredVisualAssetExpectations(article, content) {
+    const required = getArticleBriefRequiredAssets(article);
+    const visualDirective = content?.visual_directive || {};
+    return {
+        company_logo: required.needs_company_logo === true || Boolean(visualDirective.entity_slug),
+        person_reference: required.needs_person_reference === true || Boolean(visualDirective.entity_slug && visualDirective.person)
+    };
+}
+
+function summarizeLogoResolution(result) {
+    return result ? {
+        required: false,
+        ok: Boolean(result?.asset?.cloudinary_url),
+        source: result.source || null,
+        entity_slug: result.entity?.slug || null,
+        entity_name: result.entity?.name || null,
+        asset_id: result.asset?.id || null,
+        cloudinary_url: result.asset?.cloudinary_url || null,
+        error: result.error || null
+    } : null;
+}
+
+function summarizePersonReferenceResolution(result, visualDirective) {
+    return result ? {
+        required: false,
+        ok: Boolean(result?.asset?.cloudinary_url),
+        source: result.source || null,
+        entity_slug: visualDirective?.entity_slug || null,
+        person: visualDirective?.person || null,
+        asset_id: result.asset?.id || null,
+        cloudinary_url: result.asset?.cloudinary_url || null,
+        error: result.error || null
+    } : null;
+}
+
+async function resolveRequiredVisualAssets(article, content) {
+    const expected = getRequiredVisualAssetExpectations(article, content);
+    const visualDirective = content?.visual_directive || null;
+
+    const logo = await resolveEntityLogoAsset({
+        article,
+        brainFetch,
+        uploadBuffer: uploadBufferToCloudinary,
+        logger
+    });
+
+    const personReference = OPENAI_IMAGE_REFERENCE_ENABLED
+        ? await resolvePersonReferenceAsset({
+            visualDirective,
+            brainFetch,
+            uploadBuffer: uploadBufferToCloudinary,
+            logger,
+            discoveryEnabled: PERSON_REFERENCE_DISCOVERY_ENABLED
+        })
+        : { asset: null, source: 'disabled', error: 'OPENAI_IMAGE_REFERENCE_ENABLED=false' };
+
+    const diagnostics = {
+        required: expected,
+        logo: summarizeLogoResolution(logo),
+        person_reference: summarizePersonReferenceResolution(personReference, visualDirective),
+        missing: []
+    };
+
+    if (diagnostics.logo) diagnostics.logo.required = expected.company_logo;
+    if (diagnostics.person_reference) diagnostics.person_reference.required = expected.person_reference;
+
+    if (expected.company_logo && !logo?.asset?.cloudinary_url) {
+        diagnostics.missing.push({
+            asset: 'company_logo',
+            entity_slug: logo?.entity?.slug || visualDirective?.entity_slug || null,
+            reason: logo?.error || logo?.source || 'not_resolved'
+        });
+    }
+
+    if (expected.person_reference && !personReference?.asset?.cloudinary_url) {
+        diagnostics.missing.push({
+            asset: 'person_reference',
+            entity_slug: visualDirective?.entity_slug || null,
+            person: visualDirective?.person || null,
+            reason: personReference?.error || personReference?.source || 'not_resolved'
+        });
+    }
+
+    article._entityLogoAsset = logo;
+    content.required_visual_assets = diagnostics;
+
+    if (visualDirective) {
+        content.visual_directive = {
+            ...(content.visual_directive || {}),
+            person_reference_asset_id: personReference?.asset?.id || null,
+            person_reference_source: personReference?.source || null,
+            person_reference_mode: personReference?.asset
+                ? (expected.person_reference ? 'openai_image_edit_required' : 'openai_image_edit_optional')
+                : (expected.person_reference ? 'missing_required_reference' : 'text_only'),
+            person_reference_error: personReference?.error || null,
+            company_logo_asset_id: logo?.asset?.id || null,
+            company_logo_source: logo?.source || null,
+            company_logo_error: logo?.error || null
+        };
+    }
+
+    if (diagnostics.missing.length > 0) {
+        const details = diagnostics.missing
+            .map(item => `${item.asset}${item.person ? `:${item.person}` : ''}${item.entity_slug ? `:${item.entity_slug}` : ''} (${item.reason})`)
+            .join(', ');
+        const error = new Error(`Required visual assets missing: ${details}`);
+        error.code = 'REQUIRED_VISUAL_ASSET_MISSING';
+        error.required_visual_assets = diagnostics;
+        throw error;
+    }
+
+    return {
+        logo,
+        personReference,
+        personReferenceAsset: personReference?.asset || null,
+        diagnostics
+    };
 }
 
 function assertOpenAIReferenceUrl(rawUrl) {
@@ -1113,7 +1237,8 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
     const promptWithReferenceInstruction = preparedReferences.length > 0
         ? [
             finalImagePrompt,
-            'Use the uploaded reference image only for facial identity and general likeness of the named public figure.',
+            'Use the uploaded reference image as the identity anchor for the named public figure: preserve facial likeness, age range, face shape, hair, glasses, and recognizable public-figure traits.',
+            'The reference is mandatory for identity guidance; the final scene should look like a new premium editorial satire, not a loose generic lookalike.',
             'Create a new symbolic editorial scene; do not recreate the source photo and do not imply the exact scene is a real event.'
         ].join('\n\n')
         : finalImagePrompt;
@@ -1241,7 +1366,7 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
         return null;
     } catch (error) {
         const latencyMs = Date.now() - start;
-        if (preparedReferences.length > 0 && !options.skipReferences) {
+        if (preparedReferences.length > 0 && !options.skipReferences && !options.requireReference) {
             logger.warn({ provider: 'openai', action: 'image_gen', latencyMs, error: error.message }, 'OpenAI reference image edit failed - retrying text-only generation');
             return generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId, {
                 ...options,
@@ -1391,6 +1516,11 @@ async function generateBackgroundImage(imagePrompt, imageSystemPrompt, articleId
         triedOpenAIReference = true;
         const openaiImage = await generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId, options);
         if (openaiImage) return openaiImage;
+
+        if (options.requireReference) {
+            logger.error({ provider: 'openai', articleId }, 'Required OpenAI reference image generation failed');
+            return null;
+        }
 
         if (IMAGE_PROVIDER !== 'openai') {
             logger.warn({ provider: IMAGE_PROVIDER, reference_provider: 'openai', fallback_provider: 'gemini', articleId }, 'OpenAI reference image generation failed - falling back to configured provider');
@@ -1891,30 +2021,24 @@ async function processArticle(article, generationConfig) {
     // Generate a background with the configured image provider; source image stays available for overlays/fallbacks.
     let backgroundImage = null;
     const canGenerateBackground = IMAGE_PROVIDER === 'openai' || !!GEMINI_API_KEY;
-    const personReference = OPENAI_IMAGE_REFERENCE_ENABLED
-        ? await resolvePersonReferenceAsset({
-            visualDirective: content.visual_directive,
-            brainFetch,
-            uploadBuffer: uploadBufferToCloudinary,
-            logger,
-            discoveryEnabled: PERSON_REFERENCE_DISCOVERY_ENABLED
-        })
-        : { asset: null, source: 'disabled' };
-    const personReferenceAsset = personReference?.asset || null;
-    if (content.visual_directive) {
-        content.visual_directive = {
-            ...(content.visual_directive || {}),
-            person_reference_asset_id: personReferenceAsset?.id || null,
-            person_reference_source: personReference?.source || null,
-            person_reference_mode: personReferenceAsset ? 'openai_image_edit' : 'text_only',
-            person_reference_error: personReference?.error || null
-        };
+    const requiredAssets = await resolveRequiredVisualAssets(article, content);
+    const personReferenceAsset = requiredAssets.personReferenceAsset || null;
+    const expectations = requiredAssets.diagnostics.required || {};
+    if (expectations.person_reference === true && !content.image_prompt) {
+        throw new Error('Required person-reference generation needs an image_prompt, but content_plan did not provide one');
+    }
+    if (expectations.person_reference === true && !canGenerateBackground) {
+        throw new Error('Required person-reference generation needs an image provider, but no image provider is available');
     }
     if (content.image_prompt && canGenerateBackground) {
         const imageSystemPrompt = activeConfig?.playbook?.image_system_prompt || null;
         backgroundImage = await generateBackgroundImage(content.image_prompt, imageSystemPrompt, article.id, {
-            referenceAssets: personReferenceAsset ? [personReferenceAsset] : []
+            referenceAssets: personReferenceAsset ? [personReferenceAsset] : [],
+            requireReference: expectations.person_reference === true
         });
+        if (!backgroundImage && expectations.person_reference === true) {
+            throw new Error('Required person-reference image generation failed before final cover render');
+        }
     }
     if (!backgroundImage) {
         // Fallback: use source image as background if Gemini fails
@@ -1923,12 +2047,6 @@ async function processArticle(article, generationConfig) {
 
     // Store generated background so buildTemplateValueMap can use it
     article._generatedBackground = backgroundImage;
-    article._entityLogoAsset = await resolveEntityLogoAsset({
-        article,
-        brainFetch,
-        uploadBuffer: uploadBufferToCloudinary,
-        logger
-    });
 
     const templateMeta = await fetchTemplateMeta(templateId);
     const prepared = await prepareTemplateRender(article, content, templateMeta);
