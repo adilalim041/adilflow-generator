@@ -69,7 +69,7 @@ const {
     findEntityVisualDirective,
     findEditorialSceneDirective
 } = require('./lib/imagePromptDirectives');
-const { buildArticleBriefForPrompt } = require('./lib/articleBrief');
+const { buildArticleBriefForPrompt, formatBrainArticleBriefForPrompt } = require('./lib/articleBrief');
 const {
     personSlugFromName,
     resolvePersonReferenceAsset
@@ -1507,10 +1507,12 @@ async function generateContent(article, generationConfig = null, opts = {}) {
         userPrompt = DEFAULT_USER_PROMPT(article);
     }
     userPrompt = appendDateFreshnessGuard(userPrompt, article);
-    userPrompt = `${userPrompt}\n\n${buildArticleBriefForPrompt(article, {
+    const brainArticleBrief = formatBrainArticleBriefForPrompt(article?.scores_detail?.article_brief);
+    const articleBriefPrompt = brainArticleBrief || buildArticleBriefForPrompt(article, {
         visualDirective: findEntityVisualDirective(article),
         sceneDirective: findEditorialSceneDirective(article)
-    })}`;
+    });
+    userPrompt = `${userPrompt}\n\n${articleBriefPrompt}`;
     userPrompt = appendViralSatireGuard(userPrompt);
 
     // If forceAngle is requested (regen attempt), append instruction and expect it in output
