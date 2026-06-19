@@ -22,6 +22,22 @@ describe('entity asset discovery', () => {
         expect(entity.slug).toBe('openai');
     });
 
+    it('prioritizes title entity over lower-priority context mentions', () => {
+        const entity = selectMentionedEntity(
+            {
+                raw_title: 'Meta Superintelligence Labs ships its first model',
+                raw_summary: 'Benchmarks compare Muse Spark against Gemini and other Google models.',
+                raw_text: 'Gemini Gemini Gemini Google Google Google benchmark comparison.'
+            },
+            [
+                { slug: 'google', name: 'Google', entity_type: 'company', aliases: ['Gemini', 'DeepMind'] },
+                { slug: 'meta', name: 'Meta', entity_type: 'company', aliases: ['Facebook', 'Instagram', 'Llama'] }
+            ]
+        );
+
+        expect(entity.slug).toBe('meta');
+    });
+
     it('rejects untrusted logo candidate hosts', () => {
         expect(() => assertTrustedLogoUrl('https://cdn.simpleicons.org/google/000000')).not.toThrow();
         expect(() => assertTrustedLogoUrl('https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/google.svg')).not.toThrow();
