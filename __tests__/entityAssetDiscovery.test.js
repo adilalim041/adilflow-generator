@@ -47,7 +47,8 @@ describe('entity asset discovery', () => {
 
     it('returns trusted candidates only for known seeded brands', () => {
         expect(getTrustedLogoCandidates('anthropic').length).toBeGreaterThanOrEqual(2);
-        expect(getTrustedLogoCandidates('xai')).toEqual([]);
+        expect(getTrustedLogoCandidates('perplexity').length).toBeGreaterThanOrEqual(2);
+        expect(getTrustedLogoCandidates('bad slug with spaces')).toEqual([]);
     });
 
     it('wraps raw logos in a white circular badge svg', () => {
@@ -223,7 +224,7 @@ describe('entity asset discovery', () => {
         expect(logger.warn).toHaveBeenCalledWith(expect.any(Object), 'Logo candidate failed');
     });
 
-    it('keeps a legacy cached logo when no trusted candidate exists', async () => {
+    it('keeps a legacy cached logo when generic trusted candidates fail', async () => {
         const brainFetch = vi.fn(async (path) => {
             if (path.startsWith('/api/entities')) {
                 return {
@@ -259,9 +260,9 @@ describe('entity asset discovery', () => {
             logger: { warn: vi.fn() }
         });
 
-        expect(result.source).toBe('cache_legacy');
+        expect(result.source).toBe('cache_legacy_after_candidate_error');
         expect(result.asset.cloudinary_url).toContain('xai.svg');
-        expect(fetchImpl).not.toHaveBeenCalled();
+        expect(fetchImpl).toHaveBeenCalled();
         expect(uploadBuffer).not.toHaveBeenCalled();
     });
 });
