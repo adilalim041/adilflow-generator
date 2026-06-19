@@ -24,12 +24,13 @@ describe('entity asset discovery', () => {
 
     it('rejects untrusted logo candidate hosts', () => {
         expect(() => assertTrustedLogoUrl('https://cdn.simpleicons.org/google/000000')).not.toThrow();
+        expect(() => assertTrustedLogoUrl('https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/google.svg')).not.toThrow();
         expect(() => assertTrustedLogoUrl('http://cdn.simpleicons.org/google/000000')).toThrow('https');
         expect(() => assertTrustedLogoUrl('https://example.com/logo.svg')).toThrow('not allowlisted');
     });
 
     it('returns trusted candidates only for known seeded brands', () => {
-        expect(getTrustedLogoCandidates('anthropic')).toHaveLength(1);
+        expect(getTrustedLogoCandidates('anthropic').length).toBeGreaterThanOrEqual(2);
         expect(getTrustedLogoCandidates('xai')).toEqual([]);
     });
 
@@ -146,6 +147,64 @@ describe('entity asset discovery', () => {
         expect(result.asset.metadata.white_badge).toBe(true);
         expect(fetchImpl).toHaveBeenCalled();
         expect(uploadBuffer).toHaveBeenCalled();
+    });
+
+    it('tries the next trusted logo candidate when the first one fails', async () => {
+        const brainFetch = vi.fn(async (path, options = {}) => {
+            if (path.startsWith('/api/entities')) {
+                return {
+                    entities: [
+                        { slug: 'meta', name: 'Meta', entity_type: 'company', aliases: ['Facebook'] }
+                    ]
+                };
+            }
+            if (path.startsWith('/api/entity-assets') && options.method !== 'POST') {
+                return { assets: [] };
+            }
+            if (path === '/api/entity-assets' && options.method === 'POST') {
+                return {
+                    asset: {
+                        id: 4,
+                        entity_slug: 'meta',
+                        asset_type: 'logo_icon',
+                        status: 'approved',
+                        cloudinary_url: 'https://res.cloudinary.com/demo/image/upload/meta-badge.svg',
+                        metadata: JSON.parse(options.body).metadata
+                    }
+                };
+            }
+            throw new Error(`Unexpected path ${path}`);
+        });
+        const fetchImpl = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 403,
+                url: 'https://cdn.simpleicons.org/meta/000000',
+                headers: new Map()
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                url: 'https://cdn.jsdelivr.net/npm/simple-icons@latest/icons/meta.svg',
+                headers: new Map([['content-type', 'image/svg+xml'], ['content-length', '120']]),
+                arrayBuffer: async () => Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h10v10H0z"/></svg>').buffer
+            });
+        const uploadBuffer = vi.fn(async () => 'https://res.cloudinary.com/demo/image/upload/meta-badge.svg');
+        const logger = { warn: vi.fn() };
+
+        const result = await resolveEntityLogoAsset({
+            article: { id: 13, raw_title: 'Meta Superintelligence Labs ships a new model' },
+            brainFetch,
+            uploadBuffer,
+            fetchImpl,
+            logger
+        });
+
+        expect(result.source).toBe('discovered');
+        expect(result.entity.slug).toBe('meta');
+        expect(result.asset.metadata.original_candidate_url).toContain('cdn.jsdelivr.net');
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(logger.warn).toHaveBeenCalledWith(expect.any(Object), 'Logo candidate failed');
     });
 
     it('keeps a legacy cached logo when no trusted candidate exists', async () => {
