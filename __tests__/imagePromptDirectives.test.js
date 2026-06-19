@@ -198,6 +198,24 @@ describe('image prompt entity directives', () => {
         expect(prompt).toBe(original);
     });
 
+    it('uses a Brain entity visual directive override for non-hardcoded companies', () => {
+        const prompt = applyEntityImagePromptDirectives(
+            {
+                raw_title: 'Perplexity releases a new browser feature',
+                _visualDirectiveOverride: {
+                    slug: 'perplexity',
+                    person: 'Aravind Srinivas',
+                    directive: 'Feature Aravind Srinivas as the central recognizable public figure in a symbolic editorial scene connected to this Perplexity story.'
+                }
+            },
+            'A realistic office scene about a startup funding round.'
+        );
+
+        expect(prompt).toContain('Aravind Srinivas');
+        expect(prompt).toContain('Perplexity story');
+        expect(prompt).toContain('real brand logo overlay');
+    });
+
     it('does not duplicate directives when the prompt already has the layout guard', () => {
         const original = 'Feature Sam Altman in an editorial scene with a real brand logo overlay area.';
         const prompt = applyEntityImagePromptDirectives(

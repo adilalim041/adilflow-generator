@@ -69,11 +69,26 @@ const {
     findEntityVisualDirective,
     findEditorialSceneDirective
 } = require('./lib/imagePromptDirectives');
+const { buildArticleBriefForPrompt } = require('./lib/articleBrief');
 const {
     personSlugFromName,
     resolvePersonReferenceAsset
 } = require('./lib/personReferenceDiscovery');
 const { fixHeadlineArtifacts } = require('./lib/headlineArtifacts');
+const { buildEntityVisualDirectiveFromBrain } = require('./lib/articleEntityContext');
+
+async function hydrateArticleVisualContext(article) {
+    try {
+        const response = await brainFetch('/api/entities?active_only=true', { method: 'GET' });
+        const directive = buildEntityVisualDirectiveFromBrain(article, response?.entities || []);
+        if (!directive) return { source: 'fallback' };
+        article._visualDirectiveOverride = directive;
+        return { source: 'brain_entities', visualDirective: directive };
+    } catch (error) {
+        logger.warn({ articleId: article?.id, error: error.message }, 'Article visual context hydration failed');
+        return { source: 'error', error: error.message };
+    }
+}
 
 // ═══════════════════════════════════════
 // GENERATION EVENT LOGGER
@@ -1450,6 +1465,7 @@ async function generateContent(article, generationConfig = null, opts = {}) {
     const { forceAngle, temperature: tempOverride } = opts;
     const playbook = normalizePlaybook(generationConfig?.playbook);
     const imageAssessment = assessSourceImage(article);
+    await hydrateArticleVisualContext(article);
 
     if (!OPENAI_API_KEY) {
         return finalizeGeneratedContent(article, {}, playbook, imageAssessment);
@@ -1491,6 +1507,10 @@ async function generateContent(article, generationConfig = null, opts = {}) {
         userPrompt = DEFAULT_USER_PROMPT(article);
     }
     userPrompt = appendDateFreshnessGuard(userPrompt, article);
+    userPrompt = `${userPrompt}\n\n${buildArticleBriefForPrompt(article, {
+        visualDirective: findEntityVisualDirective(article),
+        sceneDirective: findEditorialSceneDirective(article)
+    })}`;
     userPrompt = appendViralSatireGuard(userPrompt);
 
     // If forceAngle is requested (regen attempt), append instruction and expect it in output
