@@ -76,6 +76,7 @@ const {
 } = require('./lib/personReferenceDiscovery');
 const { fixHeadlineArtifacts } = require('./lib/headlineArtifacts');
 const { buildEntityVisualDirectiveFromBrain } = require('./lib/articleEntityContext');
+const { getBrainContentPlan } = require('./lib/contentPlan');
 
 async function hydrateArticleVisualContext(article) {
     try {
@@ -720,8 +721,10 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     merged.caption_ru = (merged.caption_ru || fallbackCaption(article) || article.raw_title || '').trim();
     merged.hashtags = merged.hashtags || '#новости #инстаграм #медиа #обзор';
     merged.image_assessment = imageAssessment;
-    merged.image_strategy = imageAssessment.recommendation;
-    merged.use_original_image = imageAssessment.hasImage;
+    merged.image_strategy = merged.image_strategy || imageAssessment.recommendation;
+    merged.use_original_image = typeof merged.use_original_image === 'boolean'
+        ? merged.use_original_image
+        : imageAssessment.hasImage;
 
     if (imageAssessment.recommendation !== 'use_original' && !merged.image_prompt) {
         merged.image_prompt = buildImagePrompt(article, merged.angle, playbook);
@@ -1467,6 +1470,16 @@ async function generateContent(article, generationConfig = null, opts = {}) {
     const imageAssessment = assessSourceImage(article);
     await hydrateArticleVisualContext(article);
 
+    const brainContentPlan = !forceAngle ? getBrainContentPlan(article) : null;
+    if (brainContentPlan) {
+        logger.info({
+            articleId: article.id,
+            source: brainContentPlan.content_plan_source,
+            angle: brainContentPlan.angle
+        }, 'Using Brain content_plan without Generator LLM');
+        return finalizeGeneratedContent(article, brainContentPlan, playbook, imageAssessment);
+    }
+
     if (!OPENAI_API_KEY) {
         return finalizeGeneratedContent(article, {}, playbook, imageAssessment);
     }
@@ -1832,7 +1845,6 @@ async function uploadBufferToCloudinary(buffer, options = {}) {
 
 async function processArticle(article, generationConfig) {
     const activeConfig = generationConfig || await fetchGenerationConfig(article.niche || 'health_medicine');
-    const templateId = activeConfig?.templateId || INSTAGRAM_TEMPLATE_ID;
 
     // ── Caption uniqueness check with one regen attempt ──────────────────────
     // Step 1: generate content with default angle
@@ -1874,6 +1886,7 @@ async function processArticle(article, generationConfig) {
 
     // Use the (possibly regenerated) content going forward
     const content = generated;
+    const templateId = content.template_id || activeConfig?.templateId || INSTAGRAM_TEMPLATE_ID;
 
     // Generate a background with the configured image provider; source image stays available for overlays/fallbacks.
     let backgroundImage = null;
