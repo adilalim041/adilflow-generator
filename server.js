@@ -73,6 +73,7 @@ const {
     personSlugFromName,
     resolvePersonReferenceAsset
 } = require('./lib/personReferenceDiscovery');
+const { fixHeadlineArtifacts } = require('./lib/headlineArtifacts');
 
 // ═══════════════════════════════════════
 // GENERATION EVENT LOGGER
@@ -173,7 +174,7 @@ const OPENAI_IMAGE_MODEL_RAW = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
 const OPENAI_IMAGE_MODEL = normalizeOpenAIImageModel(OPENAI_IMAGE_MODEL_RAW);
 const OPENAI_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1536';
 const OPENAI_IMAGE_QUALITY = process.env.OPENAI_IMAGE_QUALITY || 'medium';
-const OPENAI_IMAGE_REFERENCE_ENABLED = parseEnvBool(process.env.OPENAI_IMAGE_REFERENCE_ENABLED, false);
+const OPENAI_IMAGE_REFERENCE_ENABLED = parseEnvBool(process.env.OPENAI_IMAGE_REFERENCE_ENABLED, true);
 const PERSON_REFERENCE_DISCOVERY_ENABLED = parseEnvBool(process.env.PERSON_REFERENCE_DISCOVERY_ENABLED, true);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3-pro-image-preview';
@@ -233,6 +234,9 @@ const VIRAL_SATIRE_COPY_GUARD = [
     '- Prefer sharp tabloid verbs and analogies in Russian: ДУШИТ, ОБОГНАЛ, РАЗДАЛ, ВЫКАТИЛ, ПРИЖАЛ, ВЗОРВАЛ, ПОДКИНУЛ, УТАЩИЛ, РАЗНЕС, ВЫБИЛ.',
     '- Use absurd framing only when it is a metaphor. Do not claim literal death, violence, crime, free access, partnership, lawsuit, or acquisition unless the article says it.',
     '- Good style examples: "ANTHROPIC ДУШИТ КОНКУРЕНТОВ НОВЫМ CLAUDE", "АМОДЕЙ ОБОГНАЛ АЛЬТМАНА В ГОНКЕ МОДЕЛЕЙ", "OPENAI РАЗДАЕТ РАЗРАБАМ КУПОНЫ НА API".',
+    '- Preserve product/model names exactly: Mythos, Fable, Claude, Opus, Sonnet, GPT, Sora, Gemini, Llama. Never translate Mythos as "мифы" or Fable as "басни".',
+    '- If the story is about the US government, Trump, export restrictions, or keeping Anthropic models online, make the US/government the pressure force in headline_ru and image_prompt.',
+    '- Never write transliterated English in Cyrillic such as "ГОВЕРНМЕНТ"; write "США", "ПРАВИТЕЛЬСТВО США", or keep the real English product name.',
     '- Bad style: dry product PR, "new possibilities", "new level", stale dates copied from examples, generic "AI changed everything".',
     '- image_prompt must describe an absurd realistic editorial satire scene, not a literal press photo or boring portrait.',
     '- The image scene can be surreal in meaning, but faces, lighting, camera, bodies, and location must look photorealistic.'
@@ -696,6 +700,7 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     const merged = { ...buildFallbackContent(article), ...(content || {}) };
     merged.headline_ru = (merged.headline_ru || '').toUpperCase() || 'ВАЖНАЯ НОВОСТЬ';
     merged.headline_ru = stripStaleLeadingDate(article, merged.headline_ru).toUpperCase();
+    merged.headline_ru = fixHeadlineArtifacts(article, merged.headline_ru).toUpperCase();
     merged.headline2_ru = merged.headline2_ru || '';
     merged.caption_ru = (merged.caption_ru || fallbackCaption(article) || article.raw_title || '').trim();
     merged.hashtags = merged.hashtags || '#новости #инстаграм #медиа #обзор';
@@ -1363,8 +1368,20 @@ async function generateGeminiBackgroundImage(imagePrompt, imageSystemPrompt, art
 
 // Arbitrary image generation — for logo/design/brand exploration
 async function generateBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null, options = {}) {
-    if (IMAGE_PROVIDER === 'openai') {
+    let triedOpenAIReference = false;
+    if (OPENAI_IMAGE_REFERENCE_ENABLED && (options.referenceAssets || []).length > 0) {
+        triedOpenAIReference = true;
         const openaiImage = await generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId, options);
+        if (openaiImage) return openaiImage;
+
+        if (IMAGE_PROVIDER !== 'openai') {
+            logger.warn({ provider: IMAGE_PROVIDER, reference_provider: 'openai', fallback_provider: 'gemini', articleId }, 'OpenAI reference image generation failed - falling back to configured provider');
+        }
+    }
+
+    if (IMAGE_PROVIDER === 'openai') {
+        const openaiOptions = triedOpenAIReference ? { ...options, skipReferences: true } : options;
+        const openaiImage = await generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId, openaiOptions);
         if (openaiImage) return openaiImage;
 
         if (GEMINI_API_KEY) {

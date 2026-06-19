@@ -150,8 +150,27 @@ describe('image prompt entity directives', () => {
         expect(scene.slug).toBe('government-pressure');
         expect(prompt).toContain('Dario Amodei');
         expect(prompt).toContain('high-stakes satirical political editorial composite');
-        expect(prompt).toContain('oversized official shoe');
+        expect(prompt).toContain('symbolic jail bars');
+        expect(prompt).toContain('locked model vault');
         expect(prompt).not.toContain('Sam Altman');
+    });
+
+    it('prioritizes government pressure over Mythos model-launch wording', () => {
+        const article = {
+            raw_title: 'Anthropic presented Mythos-class AI with Fable models',
+            raw_summary: 'The US government and export restrictions are keeping the models online and escalating the dispute.'
+        };
+
+        const scene = findEditorialSceneDirective(article);
+        const prompt = applyEntityImagePromptDirectives(
+            article,
+            'Specific photorealistic editorial news scene about: Inside the deadlock keeping Mythos offline.'
+        );
+
+        expect(scene.slug).toBe('government-pressure');
+        expect(prompt).toContain('Make the government or Donald Trump the visible pressure force');
+        expect(prompt).toContain('symbolic jail bars');
+        expect(prompt).toContain('locked model vault');
     });
 
     it('adds the right public figure for other major AI brands', () => {
