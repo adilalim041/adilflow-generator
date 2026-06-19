@@ -227,6 +227,17 @@ const IMAGE_STYLE_DIVERSITY_GUARD = [
     '- No text, letters, readable logos, watermarks, UI overlays, or poster typography.'
 ].join('\n');
 
+const VIRAL_SATIRE_COPY_GUARD = [
+    'VIRAL SATIRE COPY GUARD:',
+    '- Write headline_ru in Russian uppercase as a provocative absurd metaphor that still tells the real news idea.',
+    '- Prefer sharp tabloid verbs and analogies in Russian: ДУШИТ, ОБОГНАЛ, РАЗДАЛ, ВЫКАТИЛ, ПРИЖАЛ, ВЗОРВАЛ, ПОДКИНУЛ, УТАЩИЛ, РАЗНЕС, ВЫБИЛ.',
+    '- Use absurd framing only when it is a metaphor. Do not claim literal death, violence, crime, free access, partnership, lawsuit, or acquisition unless the article says it.',
+    '- Good style examples: "ANTHROPIC ДУШИТ КОНКУРЕНТОВ НОВЫМ CLAUDE", "АМОДЕЙ ОБОГНАЛ АЛЬТМАНА В ГОНКЕ МОДЕЛЕЙ", "OPENAI РАЗДАЕТ РАЗРАБАМ КУПОНЫ НА API".',
+    '- Bad style: dry product PR, "new possibilities", "new level", stale dates copied from examples, generic "AI changed everything".',
+    '- image_prompt must describe an absurd realistic editorial satire scene, not a literal press photo or boring portrait.',
+    '- The image scene can be surreal in meaning, but faces, lighting, camera, bodies, and location must look photorealistic.'
+].join('\n');
+
 const DEFAULT_SYSTEM_PROMPT = [
     'Ты главный редактор вирусного Instagram новостного канала с 2М подписчиков.',
     'Твоя задача — писать ДЛИННЫЕ цепляющие заголовки которые ОСТАНАВЛИВАЮТ скроллинг.',
@@ -284,9 +295,9 @@ function DEFAULT_IMAGE_SYSTEM_PROMPT(imagePrompt) {
         `- Photorealistic editorial photography, shot on Sony A7III or Canon R5`,
         `- Lighting, palette, and location should fit the specific story, not a fixed template`,
         `- Shallow depth of field only when it helps the subject`,
-        `- If a person is the subject: close-up portrait, eye-level, professional lighting`,
+        `- If a person is the subject: show them in a staged satirical action scene, not a plain close-up portrait`,
         `- If technology/product: real device, workstation, lab, server room, or product environment`,
-        `- If event/scene: documentary-style establishing shot with real-world context`,
+        `- If event/scene: realistic satirical magazine-cover staging with real-world context, not a literal documentary claim`,
         `- Aspect ratio 3:4 vertical (portrait orientation)`,
         `- ABSOLUTELY NO text, watermarks, logos, UI elements, or overlays`,
         `- Clean negative space in the lower third (text will be placed there)`,
@@ -499,6 +510,16 @@ function stripStaleLeadingDate(article, headline) {
 
     const stripped = value.slice(prefix[0].length).replace(/^[\s:—-]+/, '').trim();
     return stripped || value;
+}
+
+function appendViralSatireGuard(userPrompt) {
+    return `${userPrompt}
+
+SATIRE STYLE OVERRIDE:
+- Make headline_ru punchy, absurd, and metaphorical, while staying factually honest.
+- Avoid boring product-release phrasing.
+- For image_prompt, invent a visually unusual satirical scene that explains the article through action, rivalry, roleplay, oversized props, public reaction, or comic power imbalance.
+- Do not put any text, generated logos, or readable UI in the image.`;
 }
 
 function appendDateFreshnessGuard(userPrompt, article) {
@@ -1419,14 +1440,19 @@ async function generateContent(article, generationConfig = null, opts = {}) {
 
     // Use playbook system_prompt if available, otherwise fall back to hardcoded default.
     // Always append PROMPT_INJECTION_GUARD at the end — even for custom playbook prompts.
-    const systemPrompt = (playbook.system_prompt
+    const systemPromptBase = (playbook.system_prompt
         ? playbook.system_prompt
         : DEFAULT_SYSTEM_PROMPT + '\n' + `Правила из playbook: ${JSON.stringify({
             headlineRules: playbook.headlineRules || [],
             subheadlineRules: playbook.subheadlineRules || [],
             captionRules: playbook.captionRules || [],
             examples: playbook.examples || []
-        })}`) + PROMPT_INJECTION_GUARD;
+        })}`);
+    const systemPrompt = [
+        systemPromptBase,
+        VIRAL_SATIRE_COPY_GUARD,
+        PROMPT_INJECTION_GUARD
+    ].join('\n\n');
 
     // Use playbook user_prompt_template if available, otherwise fall back to hardcoded default.
     // Article data is XML-escaped and wrapped to prevent prompt injection from RSS content.
@@ -1448,6 +1474,7 @@ async function generateContent(article, generationConfig = null, opts = {}) {
         userPrompt = DEFAULT_USER_PROMPT(article);
     }
     userPrompt = appendDateFreshnessGuard(userPrompt, article);
+    userPrompt = appendViralSatireGuard(userPrompt);
 
     // If forceAngle is requested (regen attempt), append instruction and expect it in output
     if (forceAngle) {

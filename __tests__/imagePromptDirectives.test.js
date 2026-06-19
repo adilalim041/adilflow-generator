@@ -38,7 +38,62 @@ describe('image prompt entity directives', () => {
         expect(prompt).toContain('Dario Amodei');
         expect(prompt).toContain('Anthropic or Claude story');
         expect(prompt).toContain('real brand logo overlay');
-        expect(prompt).toContain('Storyboard: product workflow scene');
+        expect(prompt).toContain('Storyboard: absurd productivity satire');
+    });
+
+    it('uses absurd secretary roleplay for AI assistant stories', () => {
+        const article = {
+            raw_title: 'Anthropic launches an AI secretary for email and scheduling',
+            raw_summary: 'Claude can now help with calendar tasks and administrative work.'
+        };
+
+        const scene = findEditorialSceneDirective(article);
+        const prompt = applyEntityImagePromptDirectives(
+            article,
+            'A photorealistic editorial scene about office work.'
+        );
+
+        expect(scene.slug).toBe('ai-secretary-roleplay');
+        expect(prompt).toContain('Dario Amodei');
+        expect(prompt).toContain('overwhelmed executive secretary');
+        expect(prompt).toContain('human office secretaries or assistants react emotionally');
+    });
+
+    it('uses an AI race duel when one company overtakes another', () => {
+        const article = {
+            raw_title: 'Anthropic beats OpenAI in a benchmark race',
+            raw_summary: 'The new Claude model outperforms GPT in several tests.'
+        };
+
+        const scene = findEditorialSceneDirective(article);
+        const prompt = applyEntityImagePromptDirectives(
+            article,
+            'A photorealistic editorial scene about model competition.'
+        );
+
+        expect(scene.slug).toBe('ai-race-duel');
+        expect(prompt).toContain('Dario Amodei');
+        expect(prompt).toContain('track runner');
+        expect(prompt).toContain('Sam Altman');
+        expect(prompt).toContain('The winner should visibly overtake the rival');
+    });
+
+    it('uses coupon angel satire for free credit stories', () => {
+        const article = {
+            raw_title: 'OpenAI gives developers free API credits',
+            raw_summary: 'The company is offering free tokens and grants to builders.'
+        };
+
+        const scene = findEditorialSceneDirective(article);
+        const prompt = applyEntityImagePromptDirectives(
+            article,
+            'A photorealistic editorial scene about developer credits.'
+        );
+
+        expect(scene.slug).toBe('free-credit-giveaway');
+        expect(prompt).toContain('Sam Altman');
+        expect(prompt).toContain('coupon angel');
+        expect(prompt).toContain('developers reaching from a crowd');
     });
 
     it('prioritizes the title brand over body mentions of competing brands', () => {
@@ -76,7 +131,7 @@ describe('image prompt entity directives', () => {
         );
 
         expect(scene.slug).toBe('benchmark-model-launch');
-        expect(prompt).toContain('Storyboard: dramatic product/model reveal');
+        expect(prompt).toContain('Storyboard: absurd model-launch spectacle');
         expect(prompt).toContain('Dario Amodei');
     });
 
