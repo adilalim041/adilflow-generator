@@ -626,7 +626,7 @@ function buildFallbackContent(article) {
 
     return {
         headline_ru: words.slice(0, 5).join(' ').toUpperCase() || 'ВАЖНАЯ НОВОСТЬ',
-        headline2_ru: words.slice(5, 9).join(' ') || 'Главное за минуту',
+        headline2_ru: '',
         caption_ru: fallbackCaption(article) || title,
         hashtags: '#новости #инстаграм #медиа #обзор',
         use_original_image: true,
@@ -717,7 +717,7 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     merged.headline_ru = (merged.headline_ru || '').toUpperCase() || 'ВАЖНАЯ НОВОСТЬ';
     merged.headline_ru = stripStaleLeadingDate(article, merged.headline_ru).toUpperCase();
     merged.headline_ru = fixHeadlineArtifacts(article, merged.headline_ru).toUpperCase();
-    merged.headline2_ru = merged.headline2_ru || '';
+    merged.headline2_ru = '';
     merged.caption_ru = (merged.caption_ru || fallbackCaption(article) || article.raw_title || '').trim();
     merged.hashtags = merged.hashtags || '#новости #инстаграм #медиа #обзор';
     merged.image_assessment = imageAssessment;
@@ -755,8 +755,8 @@ function buildTemplateValueMap(article, content) {
     const entityInfo = article._entityLogoAsset?.entity || null;
     return {
         headline: content.headline_ru || '',
-        headline2: content.headline2_ru || '',
-        subtitle: content.headline2_ru || '',
+        headline2: '',
+        subtitle: '',
         cta: content.cta_ru || 'Самые быстрые новости от ИИ\nПодписывайся',
         callToAction: content.cta_ru || 'Самые быстрые новости от ИИ\nПодписывайся',
         body: content.caption_ru || '',
@@ -972,7 +972,7 @@ async function saveToBrain(articleId, content, coverImage, templateMeta, renderI
         method: 'POST',
         body: JSON.stringify({
             headline: content.headline_ru,
-            headline2: content.headline2_ru || '',
+            headline2: '',
             body: content.caption_ru || '',
             conclusion: content.hashtags || '',
             telegram_caption: content.caption_ru || '',

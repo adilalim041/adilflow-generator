@@ -35,6 +35,7 @@ describe('Brain content plan adapter', () => {
 
         expect(hasBrainContentPlan(article)).toBe(true);
         expect(content.headline_ru).toBe('США ЗАЖАЛИ CLAUDE В ТИСКАХ');
+        expect(content.headline2_ru).toBe('');
         expect(content.image_prompt).toContain('Dario Amodei');
         expect(content.angle).toBe('government-pressure');
         expect(content.template_id).toBe('ctrl-light-news');
