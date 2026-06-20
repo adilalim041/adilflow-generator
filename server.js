@@ -1215,6 +1215,23 @@ async function prepareOpenAIReferenceImages(referenceAssets) {
     return prepared;
 }
 
+function summarizeOpenAIReferenceAssets(references = []) {
+    return references.map((reference) => {
+        const asset = reference?.asset || reference || {};
+        return {
+            id: asset.id || null,
+            display_name: asset.display_name || asset.name || null,
+            entity_slug: asset.entity_slug || null,
+            person_entity_slug: asset.person_entity_slug || null,
+            asset_type: asset.asset_type || null,
+            cloudinary_url: asset.cloudinary_url || null,
+            source_url: asset.source_url || null,
+            source_name: asset.source_name || null,
+            filename: reference?.filename || null
+        };
+    }).filter(asset => asset.id || asset.cloudinary_url || asset.source_url);
+}
+
 async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, articleId = null, options = {}) {
     if (!OPENAI_API_KEY) {
         logger.warn('OPENAI_API_KEY not set, skipping OpenAI image generation');
@@ -1230,10 +1247,39 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
         try {
             preparedReferences = await prepareOpenAIReferenceImages(options.referenceAssets || []);
         } catch (error) {
+            const requestedReferences = summarizeOpenAIReferenceAssets(options.referenceAssets || []);
+            if (options.requireReference) {
+                logger.error({ articleId, error: error.message, reference_assets: requestedReferences }, 'Required OpenAI image reference preparation failed');
+                logEvent({
+                    articleId,
+                    kind: 'image_prompt',
+                    provider: 'openai',
+                    model: OPENAI_IMAGE_MODEL,
+                    prompt: {
+                        prompt: imagePrompt,
+                        system: imageSystemPrompt,
+                        reference_required: true,
+                        reference_assets: requestedReferences
+                    },
+                    response: null,
+                    outcome: 'error',
+                    error: `reference_preparation_failed: ${error.message}`,
+                    latencyMs: 0
+                }, { logger }).catch(() => {});
+                return null;
+            }
             logger.warn({ articleId, error: error.message }, 'OpenAI image reference preparation failed; falling back to text-only image generation');
             preparedReferences = [];
         }
     }
+    const referenceAudit = summarizeOpenAIReferenceAssets(preparedReferences);
+    const eventPrompt = {
+        prompt: imagePrompt,
+        system: imageSystemPrompt,
+        reference_required: Boolean(options.requireReference),
+        reference_assets: referenceAudit,
+        openai_endpoint: preparedReferences.length > 0 ? 'images/edits' : 'images/generations'
+    };
     const promptWithReferenceInstruction = preparedReferences.length > 0
         ? [
             finalImagePrompt,
@@ -1252,7 +1298,7 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
             kind: 'image_prompt',
             provider: 'openai',
             model: OPENAI_IMAGE_MODEL,
-            prompt: { prompt: imagePrompt, system: imageSystemPrompt },
+            prompt: eventPrompt,
             response: null,
             outcome: 'fallback',
             error: 'circuit_breaker_open',
@@ -1337,12 +1383,14 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
                 kind: 'image_prompt',
                 provider: 'openai',
                 model: OPENAI_IMAGE_MODEL,
-                prompt: { prompt: imagePrompt, system: imageSystemPrompt },
+                prompt: eventPrompt,
                 response: {
                     image_url: cloudinaryUrl,
                     size: OPENAI_IMAGE_SIZE,
                     quality: OPENAI_IMAGE_QUALITY,
-                    reference_asset_ids: preparedReferences.map(reference => reference.asset?.id).filter(Boolean)
+                    reference_asset_ids: referenceAudit.map(asset => asset.id).filter(Boolean),
+                    reference_assets: referenceAudit,
+                    reference_used: referenceAudit.length > 0
                 },
                 outcome: 'ok',
                 latencyMs
@@ -1357,7 +1405,7 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
             kind: 'image_prompt',
             provider: 'openai',
             model: OPENAI_IMAGE_MODEL,
-            prompt: { prompt: imagePrompt, system: imageSystemPrompt },
+            prompt: eventPrompt,
             response: { raw: 'no_b64_json' },
             outcome: 'fallback',
             error: 'no_image_data_in_response',
@@ -1380,8 +1428,12 @@ async function generateOpenAIBackgroundImage(imagePrompt, imageSystemPrompt, art
             kind: 'image_prompt',
             provider: 'openai',
             model: OPENAI_IMAGE_MODEL,
-            prompt: { prompt: imagePrompt, system: imageSystemPrompt },
-            response: null,
+            prompt: eventPrompt,
+            response: {
+                reference_asset_ids: referenceAudit.map(asset => asset.id).filter(Boolean),
+                reference_assets: referenceAudit,
+                reference_used: referenceAudit.length > 0
+            },
             outcome: 'error',
             error: error.message,
             latencyMs
