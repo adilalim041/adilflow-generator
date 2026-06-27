@@ -77,6 +77,7 @@ const {
 const { fixHeadlineArtifacts } = require('./lib/headlineArtifacts');
 const { buildEntityVisualDirectiveFromBrain } = require('./lib/articleEntityContext');
 const { getBrainContentPlan } = require('./lib/contentPlan');
+const { sanitizeBrainImagePrompt } = require('./lib/imagePromptSanitizer');
 
 async function hydrateArticleVisualContext(article) {
     try {
@@ -729,7 +730,9 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     if (imageAssessment.recommendation !== 'use_original' && !merged.image_prompt) {
         merged.image_prompt = buildImagePrompt(article, merged.angle, playbook);
     }
-    merged.image_prompt = normalizeImagePromptForDiversity(article, merged.image_prompt);
+    merged.image_prompt = merged.content_plan_source
+        ? sanitizeBrainImagePrompt(merged.image_prompt)
+        : normalizeImagePromptForDiversity(article, merged.image_prompt);
     merged.image_prompt = applyEntityImagePromptDirectives(article, merged.image_prompt);
     const visualDirective = findEntityVisualDirective(article);
     const editorialSceneDirective = visualDirective ? findEditorialSceneDirective(article) : null;
