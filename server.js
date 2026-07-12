@@ -749,6 +749,12 @@ function finalizeGeneratedContent(article, content, playbook, imageAssessment) {
     return merged;
 }
 
+function normalizeCoverCta(value) {
+    const cta = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!cta) return 'Подписывайся';
+    return cta.length > 24 ? 'Подписывайся' : cta;
+}
+
 function buildTemplateValueMap(article, content) {
     const sourceImage = getSourceImage(article);
     // Use generated background if available (set by processArticle via Gemini)
@@ -756,12 +762,13 @@ function buildTemplateValueMap(article, content) {
     const entityLogoAsset = article._entityLogoAsset?.asset || null;
     const entityLogoUrl = entityLogoAsset?.cloudinary_url || '';
     const entityInfo = article._entityLogoAsset?.entity || null;
+    const cta = normalizeCoverCta(content.cta_ru);
     return {
         headline: content.headline_ru || '',
         headline2: '',
         subtitle: '',
-        cta: content.cta_ru || 'Самые быстрые новости от ИИ\nПодписывайся',
-        callToAction: content.cta_ru || 'Самые быстрые новости от ИИ\nПодписывайся',
+        cta,
+        callToAction: cta,
         body: content.caption_ru || '',
         conclusion: content.hashtags || '',
         imageUrl: effectiveImage,
